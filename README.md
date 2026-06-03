@@ -31,11 +31,15 @@ npm install
 npm run dev
 ```
 
+Requires Node.js `22.5.0` or newer because the backend uses the built-in `node:sqlite` module.
+
 Open `http://127.0.0.1:5173`.
 
 The backend listens on `http://127.0.0.1:8787`.
 
 In development there are two local URLs because Vite serves the React frontend on `5173`, while the Express API runs separately on `8787`. In production/start mode the backend serves the built frontend from `http://127.0.0.1:8787`.
+
+Technical architecture, database schema and API notes are documented in [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
 
 ## Defaults
 
@@ -52,6 +56,7 @@ In development there are two local URLs because Vite serves the React frontend o
 - Claude verification: off until `ANTHROPIC_API_KEY` is set and the UI toggle is enabled.
 - Company enrichment cache: on by default.
 - Background Finland prefetch: starts after backend startup unless `PREFETCH_ON_START=false`.
+- Local database: `data/novapolis.sqlite` unless `NOVAPOLIS_DB_PATH` is set.
 
 Virre PDF scanning and website discovery do not require Claude. They run as deterministic source collection steps in the pipeline. Claude is only an optional reviewer/summarizer after evidence has already been collected.
 
@@ -125,13 +130,17 @@ The UI has three visibility modes:
 - `Only never displayed companies`: hides every company that has already been shown to the user.
 - `Include already shown`: inspection/debug mode.
 
-The app stores:
+The app stores runtime state in a local SQLite database at `data/novapolis.sqlite`:
 
-- `data/seen.json`: signal IDs and displayed companies.
-- `data/company-history.json`: growth snapshots.
-- `data/company-cache.json`: cached enrichment facts by Business ID plus a daily cache journal.
+- `seen_signals`: signal IDs already shown to the user.
+- `displayed_companies`: companies already displayed in the UI.
+- `company_growth_snapshots`: latest growth metrics by Business ID.
+- `company_enrichment_cache`: cached enrichment facts by Business ID.
+- `company_cache_runs` and `company_cache_daily_journal`: cache refresh audit data.
 
-When `Use cached enrichment` is enabled and the cache journal shows that enrichment was refreshed today, the radar runs in fast cache-only mode for enrichment: it compares candidate Business IDs against `data/company-cache.json`, returns stored enrichment for cached companies, and skips live Virre/website/web enrichment for missing or stale entries. Turn off `Use cached enrichment` to force a live refresh.
+The previous `data/*.json` files are no longer read by the application. New data is collected from scratch into SQLite.
+
+When `Use cached enrichment` is enabled and the cache journal shows that enrichment was refreshed today, the radar runs in fast cache-only mode for enrichment: it compares candidate Business IDs against SQLite cache rows, returns stored enrichment for cached companies, and skips live Virre/website/web enrichment for missing or stale entries. Turn off `Use cached enrichment` to force a live refresh.
 
 Background prefetch runs `whole-finland` scans for the configured modes and writes cache, but it calls the radar with `recordDisplay=false`. That means prefetched companies are not marked as displayed, so the next user search can still show them as fresh results.
 
@@ -143,6 +152,8 @@ POST /api/prefetch/run?force=true
 POST /api/cache/reset
 POST /api/memory/reset
 ```
+
+`POST /api/cache/reset` clears enrichment cache tables. `POST /api/memory/reset` clears displayed-company memory and growth snapshots.
 
 ## Listed-Market Growth
 
@@ -199,7 +210,7 @@ Claude does not fetch private contact databases by itself. It verifies and impro
 
 ## Growth Detection
 
-The growth agent stores snapshots in `data/company-history.json`.
+The growth agent stores the latest snapshot per company in `company_growth_snapshots`.
 
 It marks a company when:
 

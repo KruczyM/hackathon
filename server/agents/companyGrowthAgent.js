@@ -1,9 +1,6 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+import { getDatabase, runInTransaction } from "../lib/database.js";
 import { stableHash } from "../lib/hash.js";
 import { applyLeadScoringSafety } from "./scoringAgent.js";
-
-const HISTORY_PATH = path.resolve("data/company-history.json");
 
 function priority(score) {
   if (score >= 75) return "hot";
@@ -11,18 +8,82 @@ function priority(score) {
   return "watch";
 }
 
-async function readHistory() {
-  try {
-    const text = await fs.readFile(HISTORY_PATH, "utf8");
-    return JSON.parse(text);
-  } catch {
-    return { companies: {} };
-  }
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
-async function writeHistory(history) {
-  await fs.mkdir(path.dirname(HISTORY_PATH), { recursive: true });
-  await fs.writeFile(HISTORY_PATH, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+function placeholders(values) {
+  return values.map(() => "?").join(", ");
+}
+
+function loadHistoryForBusinessIds(businessIds) {
+  const ids = unique(businessIds);
+  if (!ids.length) return { companies: {} };
+
+  const rows = getDatabase()
+    .prepare(`
+      SELECT
+        business_id AS businessId,
+        company_name AS companyName,
+        snapshot_at AS snapshotAt,
+        score,
+        signal_count AS signalCount,
+        important_notices AS importantNotices,
+        official_signals AS officialSignals,
+        external_signals AS externalSignals,
+        contacts,
+        employee_count AS employeeCount,
+        consecutive_growth_runs AS consecutiveGrowthRuns
+      FROM company_growth_snapshots
+      WHERE business_id IN (${placeholders(ids)})
+    `)
+    .all(...ids);
+
+  return {
+    companies: Object.fromEntries(rows.map((row) => [row.businessId, { latest: row }]))
+  };
+}
+
+function saveGrowthSnapshots(snapshots) {
+  if (!snapshots.length) return;
+
+  runInTransaction((db) => {
+    const upsertSnapshot = db.prepare(`
+      INSERT INTO company_growth_snapshots
+        (
+          business_id, company_name, snapshot_at, score, signal_count, important_notices,
+          official_signals, external_signals, contacts, employee_count, consecutive_growth_runs
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(business_id) DO UPDATE SET
+        company_name = excluded.company_name,
+        snapshot_at = excluded.snapshot_at,
+        score = excluded.score,
+        signal_count = excluded.signal_count,
+        important_notices = excluded.important_notices,
+        official_signals = excluded.official_signals,
+        external_signals = excluded.external_signals,
+        contacts = excluded.contacts,
+        employee_count = excluded.employee_count,
+        consecutive_growth_runs = excluded.consecutive_growth_runs
+    `);
+
+    for (const snapshot of snapshots) {
+      upsertSnapshot.run(
+        snapshot.businessId,
+        snapshot.companyName,
+        snapshot.snapshotAt,
+        snapshot.score,
+        snapshot.signalCount,
+        snapshot.importantNotices,
+        snapshot.officialSignals,
+        snapshot.externalSignals,
+        snapshot.contacts,
+        snapshot.employeeCount,
+        snapshot.consecutiveGrowthRuns
+      );
+    }
+  });
 }
 
 function employeeCount(lead) {
@@ -130,8 +191,9 @@ function updateConsecutiveGrowth(current, previous) {
 }
 
 export async function applyGrowthDetection(leads) {
-  const history = await readHistory();
+  const history = loadHistoryForBusinessIds(leads.map((lead) => lead.company.businessId));
   const now = new Date().toISOString();
+  const snapshots = [];
   let jumpSignals = 0;
   let sustainedSignals = 0;
   let currentMomentumSignals = 0;
@@ -143,14 +205,13 @@ export async function applyGrowthDetection(leads) {
     const growth = growthReasons(current, previous);
     const consecutiveGrowthRuns = updateConsecutiveGrowth(current, previous);
 
-    history.companies[businessId] = {
-      latest: {
-        ...current,
-        consecutiveGrowthRuns,
-        snapshotAt: now,
-        companyName: lead.company.name
-      }
-    };
+    snapshots.push({
+      businessId,
+      companyName: lead.company.name,
+      ...current,
+      consecutiveGrowthRuns,
+      snapshotAt: now
+    });
 
     if (growth.reasons.length === 0) {
       return {
@@ -203,7 +264,7 @@ export async function applyGrowthDetection(leads) {
     };
   });
 
-  await writeHistory(history);
+  saveGrowthSnapshots(snapshots);
   return {
     leads: output.sort((a, b) => b.score - a.score),
     stats: {
@@ -215,5 +276,7 @@ export async function applyGrowthDetection(leads) {
 }
 
 export async function resetGrowthHistory() {
-  await writeHistory({ companies: {} });
+  runInTransaction((db) => {
+    db.prepare("DELETE FROM company_growth_snapshots").run();
+  });
 }

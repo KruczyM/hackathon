@@ -1,21 +1,4 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
-const MEMORY_PATH = path.resolve("data/seen.json");
-
-async function readMemory() {
-  try {
-    const text = await fs.readFile(MEMORY_PATH, "utf8");
-    return normalizeMemory(JSON.parse(text));
-  } catch {
-    return normalizeMemory({});
-  }
-}
-
-async function writeMemory(memory) {
-  await fs.mkdir(path.dirname(MEMORY_PATH), { recursive: true });
-  await fs.writeFile(MEMORY_PATH, `${JSON.stringify(normalizeMemory(memory), null, 2)}\n`, "utf8");
-}
+import { getDatabase, runInTransaction } from "../lib/database.js";
 
 function normalizeMemory(memory = {}) {
   return {
@@ -28,6 +11,64 @@ function companyId(lead) {
   return lead.company?.businessId || lead.signals?.[0]?.businessId || "";
 }
 
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function placeholders(values) {
+  return values.map(() => "?").join(", ");
+}
+
+function loadSignalsByIds(ids) {
+  if (!ids.length) return {};
+  const rows = getDatabase()
+    .prepare(`
+      SELECT
+        id,
+        first_seen_at AS firstSeenAt,
+        business_id AS businessId,
+        company_name AS companyName,
+        type,
+        title,
+        source_url AS sourceUrl
+      FROM seen_signals
+      WHERE id IN (${placeholders(ids)})
+    `)
+    .all(...ids);
+  return Object.fromEntries(rows.map((row) => [row.id, row]));
+}
+
+function loadDisplayedCompaniesByIds(ids) {
+  if (!ids.length) return {};
+  const rows = getDatabase()
+    .prepare(`
+      SELECT
+        business_id AS businessId,
+        company_name AS companyName,
+        first_displayed_at AS firstDisplayedAt,
+        last_displayed_at AS lastDisplayedAt
+      FROM displayed_companies
+      WHERE business_id IN (${placeholders(ids)})
+    `)
+    .all(...ids);
+  return Object.fromEntries(rows.map((row) => [row.businessId, row]));
+}
+
+function loadMemoryForLeads(leads) {
+  return normalizeMemory({
+    signals: loadSignalsByIds(unique(leads.flatMap((lead) => lead.signals.map((signal) => signal.id)))),
+    displayedCompanies: loadDisplayedCompaniesByIds(unique(leads.map(companyId)))
+  });
+}
+
+function memoryCounts() {
+  const db = getDatabase();
+  return {
+    totalSeenSignals: db.prepare("SELECT COUNT(*) AS count FROM seen_signals").get().count,
+    totalDisplayedCompanies: db.prepare("SELECT COUNT(*) AS count FROM displayed_companies").get().count
+  };
+}
+
 function visibleByMode(lead, visibility, memory) {
   if (visibility === "include-seen") return true;
   if (visibility === "never-displayed") return !memory.displayedCompanies[companyId(lead)];
@@ -37,7 +78,7 @@ function visibleByMode(lead, visibility, memory) {
 export async function applyMemory(leads, options = {}) {
   const recordDisplay = options.recordDisplay !== false;
   const visibility = options.visibility || (options.includeSeen ? "include-seen" : "new-signals");
-  const memory = await readMemory();
+  const memory = loadMemoryForLeads(leads);
   const now = new Date().toISOString();
   let newSignals = 0;
   let knownSignals = 0;
@@ -83,31 +124,52 @@ export async function applyMemory(leads, options = {}) {
       memory.displayedCompanies[id].lastDisplayedAt = now;
     }
 
-    for (const lead of visibleLeads) {
-      for (const signal of lead.signals) {
-        if (memory.signals[signal.id]) continue;
-        memory.signals[signal.id] = {
-          firstSeenAt: now,
-          businessId: signal.businessId,
-          companyName: signal.companyName,
-          type: signal.type,
-          title: signal.title,
-          sourceUrl: signal.sourceUrl
-        };
-      }
-    }
+    runInTransaction((db) => {
+      const upsertCompany = db.prepare(`
+        INSERT INTO displayed_companies
+          (business_id, company_name, first_displayed_at, last_displayed_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(business_id) DO UPDATE SET
+          company_name = excluded.company_name,
+          last_displayed_at = excluded.last_displayed_at
+      `);
+      const insertSignal = db.prepare(`
+        INSERT OR IGNORE INTO seen_signals
+          (id, first_seen_at, business_id, company_name, type, title, source_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
 
-    await writeMemory(memory);
+      for (const lead of visibleLeads) {
+        const id = companyId(lead);
+        if (!id) continue;
+        upsertCompany.run(id, lead.company?.name || "", now, now);
+      }
+
+      for (const lead of visibleLeads) {
+        for (const signal of lead.signals) {
+          insertSignal.run(
+            signal.id,
+            now,
+            signal.businessId || "",
+            signal.companyName || "",
+            signal.type || "",
+            signal.title || "",
+            signal.sourceUrl || ""
+          );
+        }
+      }
+    });
   }
 
+  const totals = memoryCounts();
   return {
     leads: decorated,
     visibleLeads,
     stats: {
       newSignals,
       knownSignals,
-      totalSeenSignals: Object.keys(memory.signals).length,
-      totalDisplayedCompanies: Object.keys(memory.displayedCompanies).length,
+      totalSeenSignals: totals.totalSeenSignals,
+      totalDisplayedCompanies: totals.totalDisplayedCompanies,
       newCompaniesDisplayed,
       knownCompaniesDisplayed,
       visibility,
@@ -117,14 +179,14 @@ export async function applyMemory(leads, options = {}) {
 }
 
 export async function filterLeadsWithUnseenSignals(leads) {
-  const memory = await readMemory();
+  const seenSignals = loadSignalsByIds(unique(leads.flatMap((lead) => lead.signals.map((signal) => signal.id))));
   let newCandidateSignals = 0;
   let knownCandidateSignals = 0;
 
   const filtered = leads.filter((lead) => {
-    const hasNewSignal = lead.signals.some((signal) => !memory.signals[signal.id]);
+    const hasNewSignal = lead.signals.some((signal) => !seenSignals[signal.id]);
     for (const signal of lead.signals) {
-      if (memory.signals[signal.id]) knownCandidateSignals += 1;
+      if (seenSignals[signal.id]) knownCandidateSignals += 1;
       else newCandidateSignals += 1;
     }
     return hasNewSignal;
@@ -143,5 +205,8 @@ export async function filterLeadsWithUnseenSignals(leads) {
 }
 
 export async function resetMemory() {
-  await writeMemory({ signals: {}, displayedCompanies: {} });
+  runInTransaction((db) => {
+    db.prepare("DELETE FROM seen_signals").run();
+    db.prepare("DELETE FROM displayed_companies").run();
+  });
 }

@@ -1,7 +1,11 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+import {
+  CACHE_UPDATED_AT_KEY,
+  deleteMetadata,
+  getDatabase,
+  getMetadata,
+  runInTransaction
+} from "../lib/database.js";
 
-const CACHE_PATH = path.resolve("data/company-cache.json");
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const JOURNAL_DAYS = 30;
 
@@ -11,30 +15,6 @@ function businessId(company) {
 
 function currentName(company) {
   return company.names?.find((name) => name.type === "1" && name.version === 1)?.name ?? company.names?.[0]?.name ?? company.name ?? "";
-}
-
-function normalizeCache(cache = {}) {
-  return {
-    version: 2,
-    updatedAt: cache.updatedAt || "",
-    companies: cache.companies && typeof cache.companies === "object" ? cache.companies : {},
-    runs: Array.isArray(cache.runs) ? cache.runs.slice(-30) : [],
-    dailyJournal: cache.dailyJournal && typeof cache.dailyJournal === "object" ? cache.dailyJournal : {}
-  };
-}
-
-async function readCache() {
-  try {
-    const text = await fs.readFile(CACHE_PATH, "utf8");
-    return normalizeCache(JSON.parse(text));
-  } catch {
-    return normalizeCache();
-  }
-}
-
-async function writeCache(cache) {
-  await fs.mkdir(path.dirname(CACHE_PATH), { recursive: true });
-  await fs.writeFile(CACHE_PATH, `${JSON.stringify(normalizeCache(cache), null, 2)}\n`, "utf8");
 }
 
 function isFresh(entry, ttlMs) {
@@ -53,23 +33,72 @@ function todayKey() {
   return dateKey();
 }
 
-function cacheDailyStatus(cache) {
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function placeholders(values) {
+  return values.map(() => "?").join(", ");
+}
+
+function countCompaniesCached() {
+  return getDatabase().prepare("SELECT COUNT(*) AS count FROM company_enrichment_cache").get().count;
+}
+
+function cacheUpdatedAt() {
+  const metadataValue = getMetadata(CACHE_UPDATED_AT_KEY);
+  if (metadataValue) return metadataValue;
+  return getDatabase().prepare("SELECT MAX(fetched_at) AS updatedAt FROM company_enrichment_cache").get().updatedAt || "";
+}
+
+function dailyJournalValues(dates) {
+  if (!dates.length) return {};
+  const rows = getDatabase()
+    .prepare(`
+      SELECT date, kind, value
+      FROM company_cache_daily_values
+      WHERE date IN (${placeholders(dates)})
+      ORDER BY kind, value
+    `)
+    .all(...dates);
+  const grouped = Object.fromEntries(dates.map((date) => [date, { modes: [], regions: [], sources: [] }]));
+  for (const row of rows) {
+    const target = grouped[row.date];
+    if (!target) continue;
+    if (row.kind === "mode") target.modes.push(row.value);
+    if (row.kind === "region") target.regions.push(row.value);
+    if (row.kind === "source") target.sources.push(row.value);
+  }
+  return grouped;
+}
+
+function dailyJournalByDate(date) {
+  const row = getDatabase()
+    .prepare(`
+      SELECT
+        date,
+        first_updated_at AS firstUpdatedAt,
+        updated_at AS updatedAt,
+        saved,
+        checked
+      FROM company_cache_daily_journal
+      WHERE date = ?
+    `)
+    .get(date);
+  if (!row) return null;
+  const values = dailyJournalValues([date])[date] || { modes: [], regions: [], sources: [] };
+  return { ...row, ...values };
+}
+
+function cacheDailyStatus() {
   const today = todayKey();
-  const journal = cache.dailyJournal?.[today];
-  const updatedToday = Boolean(journal) || dateKey(cache.updatedAt) === today;
+  const journal = dailyJournalByDate(today);
+  const updatedToday = Boolean(journal) || dateKey(cacheUpdatedAt()) === today;
   return {
     today,
     updatedToday,
     journal: journal || null
   };
-}
-
-function pruneDailyJournal(dailyJournal) {
-  return Object.fromEntries(
-    Object.entries(dailyJournal || {})
-      .sort(([left], [right]) => left.localeCompare(right))
-      .slice(-JOURNAL_DAYS)
-  );
 }
 
 function cleanEnrichmentForCache(enrichment) {
@@ -79,18 +108,49 @@ function cleanEnrichmentForCache(enrichment) {
   return cleaned;
 }
 
+function loadCacheEntriesByIds(ids) {
+  const uniqueIds = unique(ids);
+  if (!uniqueIds.length) return {};
+  const rows = getDatabase()
+    .prepare(`
+      SELECT
+        business_id AS businessId,
+        company_name AS companyName,
+        fetched_at AS fetchedAt,
+        last_modified AS lastModified,
+        website,
+        employee_count AS employeeCount,
+        employee_count_source_url AS employeeCountSourceUrl,
+        contact_source_url AS contactSourceUrl,
+        enrichment_json AS enrichmentJson
+      FROM company_enrichment_cache
+      WHERE business_id IN (${placeholders(uniqueIds)})
+    `)
+    .all(...uniqueIds);
+
+  return Object.fromEntries(
+    rows.map((row) => {
+      try {
+        return [row.businessId, { ...row, enrichment: JSON.parse(row.enrichmentJson) }];
+      } catch {
+        return [row.businessId, { ...row, enrichment: null }];
+      }
+    })
+  );
+}
+
 export async function getCachedEnrichmentMap(companies, options = {}) {
   const ttlMs = Number.parseInt(options.ttlMs, 10) || DEFAULT_TTL_MS;
   const cacheOnly = options.cacheOnly === true || options.cacheOnly === "true";
-  const cache = await readCache();
-  const daily = cacheDailyStatus(cache);
+  const daily = cacheDailyStatus();
+  const entries = loadCacheEntriesByIds(companies.map(businessId));
   const map = new Map();
   const stale = [];
   const missing = [];
 
   for (const company of companies) {
     const id = businessId(company);
-    const entry = cache.companies[id];
+    const entry = entries[id];
     if (entry?.enrichment && (cacheOnly || isFresh(entry, ttlMs))) {
       map.set(id, {
         ...entry.enrichment,
@@ -125,82 +185,142 @@ export async function getCachedEnrichmentMap(companies, options = {}) {
 }
 
 export async function saveEnrichmentCache(companies, enrichmentMap, meta = {}) {
-  const cache = await readCache();
   const now = new Date().toISOString();
   const key = dateKey(now);
   let saved = 0;
 
-  for (const company of companies) {
-    const id = businessId(company);
-    const enrichment = enrichmentMap.get(id);
-    if (!id || !enrichment) continue;
-    if (enrichment.fromCache && meta.saveCachedEntries !== true) continue;
-    const cacheEnrichment = cleanEnrichmentForCache(enrichment);
-    cache.companies[id] = {
-      businessId: id,
-      companyName: currentName(company),
-      fetchedAt: now,
-      lastModified: company.lastModified || "",
-      website: cacheEnrichment.companyWebsite || company.website?.url || "",
-      employeeCount: cacheEnrichment.employeeCount || "",
-      employeeCountSourceUrl: cacheEnrichment.employeeCountSourceUrl || "",
-      contactSourceUrl: cacheEnrichment.contactSourceUrl || cacheEnrichment.sourceUrl || "",
-      enrichment: cacheEnrichment
-    };
-    saved += 1;
-  }
+  runInTransaction((db) => {
+    const upsertCache = db.prepare(`
+      INSERT INTO company_enrichment_cache
+        (
+          business_id, company_name, fetched_at, last_modified, website, employee_count,
+          employee_count_source_url, contact_source_url, enrichment_json
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(business_id) DO UPDATE SET
+        company_name = excluded.company_name,
+        fetched_at = excluded.fetched_at,
+        last_modified = excluded.last_modified,
+        website = excluded.website,
+        employee_count = excluded.employee_count,
+        employee_count_source_url = excluded.employee_count_source_url,
+        contact_source_url = excluded.contact_source_url,
+        enrichment_json = excluded.enrichment_json
+    `);
+
+    for (const company of companies) {
+      const id = businessId(company);
+      const enrichment = enrichmentMap.get(id);
+      if (!id || !enrichment) continue;
+      if (enrichment.fromCache && meta.saveCachedEntries !== true) continue;
+      const cacheEnrichment = cleanEnrichmentForCache(enrichment);
+      upsertCache.run(
+        id,
+        currentName(company),
+        now,
+        company.lastModified || "",
+        cacheEnrichment.companyWebsite || company.website?.url || "",
+        cacheEnrichment.employeeCount || "",
+        cacheEnrichment.employeeCountSourceUrl || "",
+        cacheEnrichment.contactSourceUrl || cacheEnrichment.sourceUrl || "",
+        JSON.stringify(cacheEnrichment)
+      );
+      saved += 1;
+    }
+
+    if (!saved) return;
+
+    db.prepare(`
+      INSERT INTO app_metadata (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(CACHE_UPDATED_AT_KEY, now, now);
+
+    db.prepare(`
+      INSERT INTO company_cache_runs (at, saved, checked, market_mode, region, source)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(now, saved, companies.length, meta.marketMode || "", meta.region || "", meta.source || "radar");
+
+    db.prepare(`
+      INSERT INTO company_cache_daily_journal
+        (date, first_updated_at, updated_at, saved, checked)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(date) DO UPDATE SET
+        updated_at = excluded.updated_at,
+        saved = company_cache_daily_journal.saved + excluded.saved,
+        checked = company_cache_daily_journal.checked + excluded.checked
+    `).run(key, now, now, saved, companies.length);
+
+    const insertValue = db.prepare(`
+      INSERT OR IGNORE INTO company_cache_daily_values (date, kind, value)
+      VALUES (?, ?, ?)
+    `);
+    if (meta.marketMode) insertValue.run(key, "mode", meta.marketMode);
+    if (meta.region) insertValue.run(key, "region", meta.region);
+    insertValue.run(key, "source", meta.source || "radar");
+
+    db.prepare(`
+      DELETE FROM company_cache_daily_journal
+      WHERE date NOT IN (
+        SELECT date
+        FROM company_cache_daily_journal
+        ORDER BY date DESC
+        LIMIT ?
+      )
+    `).run(JOURNAL_DAYS);
+  });
 
   if (!saved) {
-    return { saved: 0, updatedAt: cache.updatedAt || "", totalCompaniesCached: Object.keys(cache.companies).length };
+    return { saved: 0, updatedAt: cacheUpdatedAt(), totalCompaniesCached: countCompaniesCached() };
   }
 
-  cache.updatedAt = now;
-  cache.runs.push({
-    at: now,
-    saved,
-    checked: companies.length,
-    marketMode: meta.marketMode || "",
-    region: meta.region || "",
-    source: meta.source || "radar"
-  });
-  cache.runs = cache.runs.slice(-30);
-  const journal = cache.dailyJournal[key] || {
-    date: key,
-    firstUpdatedAt: now,
-    saved: 0,
-    checked: 0,
-    modes: [],
-    regions: [],
-    sources: []
-  };
-  journal.updatedAt = now;
-  journal.saved += saved;
-  journal.checked += companies.length;
-  if (meta.marketMode && !journal.modes.includes(meta.marketMode)) journal.modes.push(meta.marketMode);
-  if (meta.region && !journal.regions.includes(meta.region)) journal.regions.push(meta.region);
-  const source = meta.source || "radar";
-  if (!journal.sources.includes(source)) journal.sources.push(source);
-  cache.dailyJournal[key] = journal;
-  cache.dailyJournal = pruneDailyJournal(cache.dailyJournal);
-  await writeCache(cache);
-  return { saved, updatedAt: now, totalCompaniesCached: Object.keys(cache.companies).length };
+  return { saved, updatedAt: now, totalCompaniesCached: countCompaniesCached() };
 }
 
 export async function getCompanyCacheStatus() {
-  const cache = await readCache();
-  const daily = cacheDailyStatus(cache);
+  const db = getDatabase();
+  const updatedAt = cacheUpdatedAt();
+  const daily = cacheDailyStatus();
+  const journalRows = db.prepare(`
+    SELECT
+      date,
+      first_updated_at AS firstUpdatedAt,
+      updated_at AS updatedAt,
+      saved,
+      checked
+    FROM company_cache_daily_journal
+    ORDER BY date DESC
+    LIMIT 10
+  `).all();
+  const values = dailyJournalValues(journalRows.map((row) => row.date));
+
   return {
-    updatedAt: cache.updatedAt || "",
+    updatedAt,
     updatedToday: daily.updatedToday,
     today: daily.today,
-    totalCompaniesCached: Object.keys(cache.companies).length,
-    recentRuns: cache.runs.slice(-10).reverse(),
-    dailyJournal: Object.values(cache.dailyJournal || {})
-      .sort((left, right) => String(right.date).localeCompare(String(left.date)))
-      .slice(0, 10)
+    totalCompaniesCached: countCompaniesCached(),
+    recentRuns: db.prepare(`
+      SELECT
+        at,
+        saved,
+        checked,
+        market_mode AS marketMode,
+        region,
+        source
+      FROM company_cache_runs
+      ORDER BY at DESC
+      LIMIT 10
+    `).all(),
+    dailyJournal: journalRows.map((row) => ({ ...row, ...(values[row.date] || { modes: [], regions: [], sources: [] }) }))
   };
 }
 
 export async function resetCompanyCache() {
-  await writeCache(normalizeCache());
+  runInTransaction((db) => {
+    db.prepare("DELETE FROM company_enrichment_cache").run();
+    db.prepare("DELETE FROM company_cache_runs").run();
+    db.prepare("DELETE FROM company_cache_daily_values").run();
+    db.prepare("DELETE FROM company_cache_daily_journal").run();
+  });
+  deleteMetadata(CACHE_UPDATED_AT_KEY);
 }
