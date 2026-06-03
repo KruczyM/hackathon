@@ -202,8 +202,7 @@ button {
 .warning,
 .newsletter,
 .sources,
-.pipeline,
-.prefetch-status {
+.pipeline {
   margin-top: 18px;
   background: #fff;
   border: 1px solid #dde5de;
@@ -222,28 +221,6 @@ button {
 
 .warning {
   border-color: #d6b25e;
-}
-
-.prefetch-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  align-items: center;
-  margin-top: 10px;
-  padding: 10px 12px;
-  color: #526263;
-}
-
-.prefetch-status strong {
-  color: #263234;
-}
-
-.prefetch-errors {
-  display: grid;
-  flex-basis: 100%;
-  gap: 4px;
-  color: #8a1f1f;
-  font-size: 0.86rem;
 }
 
 .metrics {

@@ -75,7 +75,6 @@ export default function App() {
     employeeSearchLimit: 5
   });
   const [data, setData] = useState(null);
-  const [prefetch, setPrefetch] = useState(null);
   const [loading, setLoading] = useState(false);
   const [prefetchLoading, setPrefetchLoading] = useState(false);
   const [error, setError] = useState("");
@@ -105,10 +104,6 @@ export default function App() {
     claudeLimit: String(form.claudeLimit)
   }), [form, region]);
 
-  useEffect(() => {
-    refreshPrefetchStatus();
-  }, []);
-
   async function runRadar() {
     setLoading(true);
     setError("");
@@ -128,23 +123,12 @@ export default function App() {
     setData(null);
   }
 
-  async function refreshPrefetchStatus() {
-    try {
-      const response = await fetch("/api/prefetch/status");
-      if (response.ok) setPrefetch(await response.json());
-    } catch {
-      // Prefetch status is informational; radar can run without it.
-    }
-  }
-
   async function runPrefetch() {
     setPrefetchLoading(true);
     try {
-      const response = await fetch("/api/prefetch/run?force=true", { method: "POST" });
-      if (response.ok) setPrefetch(await response.json());
+      await fetch("/api/prefetch/run?force=true", { method: "POST" });
     } finally {
       setPrefetchLoading(false);
-      refreshPrefetchStatus();
     }
   }
 
@@ -274,7 +258,6 @@ export default function App() {
       </section>
 
       <p className="area-detail"><strong>{selectedMode?.label}:</strong> {selectedMode?.detail} <span>{selectedArea?.detail}</span></p>
-      <PrefetchStatus prefetch={prefetch} />
 
       {error && <section className="error">Error: {error}</section>}
       {!data && !error && <EmptyState />}
@@ -289,45 +272,6 @@ function EmptyState() {
     <section className="empty">
       <h2>Click Run source pipeline</h2>
       <p>Pick one search mode, then run the pipeline. Public web enrichment, Virre PDF scan and website discovery are always enabled. Background prefetch can warm the cache without marking companies as displayed.</p>
-    </section>
-  );
-}
-
-function PrefetchStatus({ prefetch }) {
-  if (!prefetch) return null;
-  const cache = prefetch.cache || {};
-  const lastRun = prefetch.lastRun || {};
-  const modeErrors = (lastRun.modes || []).flatMap((mode) => {
-    return (mode.errors || []).map((error) => ({
-      mode: mode.mode,
-      source: error.source,
-      message: error.message
-    }));
-  }).slice(0, 4);
-  return (
-    <section className="prefetch-status">
-      <strong>Background cache: {prefetch.status}</strong>
-      <span>
-        {cache.totalCompaniesCached || 0} companies cached
-        {cache.updatedAt ? ` / last updated ${formatDateTime(cache.updatedAt)}` : ""}
-        {prefetch.activeMode ? ` / scanning ${prefetch.activeMode}` : ""}
-      </span>
-      {lastRun.finishedAt ? (
-        <span>
-          Last prefetch: {lastRun.forcedRefresh ? "forced refresh" : lastRun.skipped ? "skipped" : "completed"}
-          {lastRun.totalCacheSaved !== undefined ? ` / saved ${lastRun.totalCacheSaved}` : ""}
-          {lastRun.totalLeadsPrepared !== undefined ? ` / prepared ${lastRun.totalLeadsPrepared}` : ""}
-        </span>
-      ) : null}
-      {modeErrors.length ? (
-        <div className="prefetch-errors">
-          {modeErrors.map((error, index) => (
-            <span key={`${error.mode}-${error.source}-${index}`}>
-              {formatMode(error.mode)}: {error.source} - {error.message}
-            </span>
-          ))}
-        </div>
-      ) : null}
     </section>
   );
 }
