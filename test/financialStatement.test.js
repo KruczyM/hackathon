@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractEmployeeCountFromFinancialXml } from "../server/agents/financialStatementAgent.js";
+import {
+  extractEmployeeCountFromFinancialXml,
+  extractFinancialScaleProxyFromXml
+} from "../server/agents/financialStatementAgent.js";
 
 test("extractEmployeeCountFromFinancialXml finds average employee count facts", () => {
   const xml = `
@@ -15,3 +18,15 @@ test("extractEmployeeCountFromFinancialXml finds average employee count facts", 
   assert.equal(fact.factName, "AverageNumberOfEmployeesDuringPeriod");
 });
 
+test("extractFinancialScaleProxyFromXml finds official revenue scale when employees are missing", () => {
+  const xml = `
+    <xbrli:xbrl>
+      <fi-sme:NetSales contextRef="duration">12500000</fi-sme:NetSales>
+    </xbrli:xbrl>
+  `;
+
+  const proxy = extractFinancialScaleProxyFromXml(xml);
+  assert.equal(proxy.segment, "large_opportunity_proxy");
+  assert.equal(proxy.metric, "net_sales");
+  assert.equal(proxy.amount, 12500000);
+});

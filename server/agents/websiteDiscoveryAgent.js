@@ -20,7 +20,6 @@ const COMPANY_WORD_STOPWORDS = new Set([
   "company",
   "corp",
   "corporation",
-  "group",
   "holding",
   "holdings",
   "inc",

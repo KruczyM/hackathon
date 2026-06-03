@@ -34,12 +34,12 @@ const searchModes = [
   {
     value: "mid-market",
     label: "Mid-market",
-    detail: "Existing companies with sourced 50-249 employee counts. This is the core Novapolis target segment."
+    detail: "Existing companies with sourced 50-249 employee counts or official financial scale proxy. This is the core Novapolis target segment."
   },
   {
     value: "large-opportunities",
     label: "Large 250-999",
-    detail: "Existing companies with sourced 250-999 employee counts. Secondary Novapolis targets: project teams, satellite office needs, meetings and employee services."
+    detail: "Existing companies with sourced 250-999 employee counts or official financial scale proxy. Secondary Novapolis targets: project teams, satellite office needs, meetings and employee services."
   },
   {
     value: "enterprise-watch",
@@ -296,6 +296,14 @@ function EmptyState() {
 function PrefetchStatus({ prefetch }) {
   if (!prefetch) return null;
   const cache = prefetch.cache || {};
+  const lastRun = prefetch.lastRun || {};
+  const modeErrors = (lastRun.modes || []).flatMap((mode) => {
+    return (mode.errors || []).map((error) => ({
+      mode: mode.mode,
+      source: error.source,
+      message: error.message
+    }));
+  }).slice(0, 4);
   return (
     <section className="prefetch-status">
       <strong>Background cache: {prefetch.status}</strong>
@@ -304,6 +312,22 @@ function PrefetchStatus({ prefetch }) {
         {cache.updatedAt ? ` / last updated ${formatDateTime(cache.updatedAt)}` : ""}
         {prefetch.activeMode ? ` / scanning ${prefetch.activeMode}` : ""}
       </span>
+      {lastRun.finishedAt ? (
+        <span>
+          Last prefetch: {lastRun.forcedRefresh ? "forced refresh" : lastRun.skipped ? "skipped" : "completed"}
+          {lastRun.totalCacheSaved !== undefined ? ` / saved ${lastRun.totalCacheSaved}` : ""}
+          {lastRun.totalLeadsPrepared !== undefined ? ` / prepared ${lastRun.totalLeadsPrepared}` : ""}
+        </span>
+      ) : null}
+      {modeErrors.length ? (
+        <div className="prefetch-errors">
+          {modeErrors.map((error, index) => (
+            <span key={`${error.mode}-${error.source}-${index}`}>
+              {formatMode(error.mode)}: {error.source} - {error.message}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -335,6 +359,7 @@ function Results({ data, claudeEnabled }) {
         <Metric label="Known signals" value={data.totals.knownSignals} />
         <Metric label="Official records" value={data.totals.companiesReturned} />
         <Metric label="Official employees" value={data.totals.officialEmployeeCounts || 0} />
+        <Metric label="Scale proxies" value={data.totals.financialScaleProxies || 0} />
         <Metric label="Current employees" value={data.totals.currentEmployeeCounts || 0} />
         <Metric label="Websites verified" value={data.totals.websitesDiscovered || 0} />
         <Metric label="Virre people" value={data.totals.virreDecisionMakers || 0} />
@@ -343,6 +368,7 @@ function Results({ data, claudeEnabled }) {
         <Metric label="Cache saved" value={data.totals.cacheSaved || 0} />
         <Metric label="Displayed companies" value={data.totals.totalDisplayedCompanies || 0} />
         <Metric label="Listed momentum" value={data.totals.listedGrowthSignals || 0} />
+        <Metric label="Yahoo employees" value={data.totals.listedYahooEmployeeCounts || 0} />
         <Metric label="Growth signals" value={(data.totals.jumpSignals || 0) + (data.totals.sustainedSignals || 0) + (data.totals.currentMomentumSignals || 0)} />
       </section>
 
@@ -544,8 +570,9 @@ function LeadCard({ lead, claudeEnabled }) {
         <Fact label="Readiness" value={`${lead.dataConfidence || "Low"} confidence / ${lead.outreachReadiness || "Needs verification"}`} />
         <Fact label="Website" value={formatWebsite(lead)} source={websiteSource(lead)} />
         <Fact label="Employees" value={formatEmployees(lead)} source={employeeSource(lead)} />
-        <Fact label="Company size" value={formatCompanySize(lead)} source={employeeSource(lead)} />
-        <Fact label="Segment" value={formatSegment(lead)} source={employeeSource(lead)} />
+        <Fact label="Scale proxy" value={formatScaleProxy(lead)} source={scaleProxySource(lead)} />
+        <Fact label="Company size" value={formatCompanySize(lead)} source={sizeSource(lead)} />
+        <Fact label="Segment" value={formatSegment(lead)} source={sizeSource(lead)} />
         <Fact label="Growth / hiring" value={formatGrowthHiring(lead)} source={growthHiringSource(lead)} />
         <Fact label="Decision maker" value={formatDecisionMaker(lead)} source={decisionSource(lead)} />
         <Fact label="Email / phone" value={formatContact(lead)} source={contactSource(lead)} />
@@ -627,6 +654,14 @@ function formatCompanySize(lead) {
   return lead.companySizeEstimate?.value || "unknown";
 }
 
+function formatScaleProxy(lead) {
+  if (!lead.enrichment.organizationScaleProxy) return "missing source";
+  return [
+    lead.enrichment.organizationScaleProxyLabel,
+    lead.enrichment.organizationScaleProxyAmountLabel
+  ].filter(Boolean).join(" / ");
+}
+
 function formatSegment(lead) {
   const segment = lead.employeeSegment;
   if (!segment?.label) return "unknown";
@@ -665,6 +700,14 @@ function websiteSource(lead) {
 
 function employeeSource(lead) {
   return lead.enrichment.currentEmployeeCountSourceUrl || lead.enrichment.employeeCountSourceUrl || "";
+}
+
+function scaleProxySource(lead) {
+  return lead.enrichment.organizationScaleProxySourceUrl || "";
+}
+
+function sizeSource(lead) {
+  return employeeSource(lead) || scaleProxySource(lead);
 }
 
 function formatDecisionMaker(lead) {

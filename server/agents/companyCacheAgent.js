@@ -7,6 +7,7 @@ import {
 } from "../lib/database.js";
 
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const ENDPOINT_SKIP_CACHE_MS = 12 * 60 * 60 * 1000;
 const JOURNAL_DAYS = 30;
 
 function businessId(company) {
@@ -49,6 +50,12 @@ function cacheUpdatedAt() {
   const metadataValue = getMetadata(CACHE_UPDATED_AT_KEY);
   if (metadataValue) return metadataValue;
   return getDatabase().prepare("SELECT MAX(fetched_at) AS updatedAt FROM company_enrichment_cache").get().updatedAt || "";
+}
+
+function cacheAgeMs(updatedAt = cacheUpdatedAt()) {
+  const parsed = Date.parse(updatedAt || "");
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Date.now() - parsed);
 }
 
 function dailyJournalValues(dates) {
@@ -151,7 +158,8 @@ export async function getCachedEnrichmentMap(companies, options = {}) {
   for (const company of companies) {
     const id = businessId(company);
     const entry = entries[id];
-    if (entry?.enrichment && (cacheOnly || isFresh(entry, ttlMs))) {
+    const entryIsFresh = entry && isFresh(entry, cacheOnly ? ENDPOINT_SKIP_CACHE_MS : ttlMs);
+    if (entry?.enrichment && entryIsFresh) {
       map.set(id, {
         ...entry.enrichment,
         fromCache: true,
@@ -178,6 +186,7 @@ export async function getCachedEnrichmentMap(companies, options = {}) {
       skippedStale: cacheOnly ? stale.length : 0,
       cacheOnly,
       updatedToday: daily.updatedToday,
+      freshForEndpointSkip: cacheAgeMs() !== null && cacheAgeMs() <= ENDPOINT_SKIP_CACHE_MS,
       journalDate: daily.today,
       ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000))
     }
@@ -280,6 +289,7 @@ export async function saveEnrichmentCache(companies, enrichmentMap, meta = {}) {
 export async function getCompanyCacheStatus() {
   const db = getDatabase();
   const updatedAt = cacheUpdatedAt();
+  const ageMs = cacheAgeMs(updatedAt);
   const daily = cacheDailyStatus();
   const journalRows = db.prepare(`
     SELECT
@@ -296,6 +306,9 @@ export async function getCompanyCacheStatus() {
 
   return {
     updatedAt,
+    cacheAgeMs: ageMs,
+    cacheMaxEndpointSkipHours: Math.round(ENDPOINT_SKIP_CACHE_MS / (60 * 60 * 1000)),
+    freshForEndpointSkip: ageMs !== null && ageMs <= ENDPOINT_SKIP_CACHE_MS,
     updatedToday: daily.updatedToday,
     today: daily.today,
     totalCompaniesCached: countCompaniesCached(),
@@ -318,6 +331,7 @@ export async function getCompanyCacheStatus() {
 export async function resetCompanyCache() {
   runInTransaction((db) => {
     db.prepare("DELETE FROM company_enrichment_cache").run();
+    db.prepare("DELETE FROM official_market_cache").run();
     db.prepare("DELETE FROM company_cache_runs").run();
     db.prepare("DELETE FROM company_cache_daily_values").run();
     db.prepare("DELETE FROM company_cache_daily_journal").run();

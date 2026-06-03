@@ -38,6 +38,18 @@ test("generateWebsiteCandidates searches public-company domain without Oyj suffi
   assert.ok(candidates.includes("https://www.almamedia.fi"));
 });
 
+test("generateWebsiteCandidates keeps Group brand word and tries fi and com without Oyj suffix", () => {
+  const candidates = generateWebsiteCandidates({
+    businessId: "1234567-8",
+    companyName: "Eagle Filters Group Oyj",
+    auxiliaryNames: []
+  });
+  assert.ok(candidates.includes("https://www.eaglefiltersgroup.fi"));
+  assert.ok(candidates.includes("https://www.eaglefiltersgroup.com"));
+  assert.ok(candidates.includes("https://www.eaglefilters.fi"));
+  assert.ok(candidates.includes("https://www.eaglefilters.com"));
+});
+
 test("generateSearchQueries includes business ID and Virre decision maker context", () => {
   const queries = generateSearchQueries(input);
   assert.ok(queries.includes("\"Borealis Acute Operations Oy\" \"3626814-8\""));

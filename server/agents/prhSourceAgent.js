@@ -1,5 +1,9 @@
 import { dateRangeForDays } from "../lib/dates.js";
+import { describeFetchError } from "../lib/fetchErrors.js";
+import { stableHash } from "../lib/hash.js";
 import { expandMarketArea, marketAreaLabel } from "../lib/regions.js";
+import { getDatabase } from "../lib/database.js";
+import { ENDPOINT_SKIP_CACHE_MS } from "./companyCacheAgent.js";
 
 const YTJ_BASE = "https://avoindata.prh.fi/opendata-ytj-api/v3";
 const NOTICES_BASE = "https://avoindata.prh.fi/opendata-registerednotices-api/v3";
@@ -25,6 +29,8 @@ async function fetchJson(url, timeoutMs = 20000) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return await response.json();
+  } catch (error) {
+    throw new Error(describeFetchError(error, url));
   } finally {
     timeout.clear();
   }
@@ -52,6 +58,76 @@ async function fetchPaged({ base, path, params, maxPages, pageSize }) {
   }
 
   return { totalResults, items, pagesFetched: totalPages };
+}
+
+function useOfficialSourceCache(options = {}) {
+  return options.useCache !== false && options.useCache !== "false";
+}
+
+function shouldReadOfficialSourceCache(options = {}) {
+  return useOfficialSourceCache(options) && options.refreshCache !== true && options.refreshCache !== "true";
+}
+
+function officialCacheKey({ options, range, cities, profile, maxPages }) {
+  return stableHash({
+    marketMode: profile.marketMode,
+    region: options.region || "kuopio-hub",
+    range,
+    cities,
+    companyForms: profile.companyForms,
+    companyForm: options.companyForm || "ANY",
+    maxPages
+  });
+}
+
+function readOfficialMarketCache(cacheKey) {
+  const row = getDatabase()
+    .prepare("SELECT fetched_at AS fetchedAt, payload_json AS payloadJson FROM official_market_cache WHERE cache_key = ?")
+    .get(cacheKey);
+  if (!row) return null;
+  const fetchedAtMs = Date.parse(row.fetchedAt || "");
+  if (!Number.isFinite(fetchedAtMs)) return null;
+  const ageMs = Date.now() - fetchedAtMs;
+  if (ageMs > ENDPOINT_SKIP_CACHE_MS) return null;
+  try {
+    const payload = JSON.parse(row.payloadJson);
+    return {
+      ...payload,
+      sourceCache: {
+        status: "hit",
+        fetchedAt: row.fetchedAt,
+        ageMs
+      },
+      totals: {
+        ...payload.totals,
+        sourceCacheHit: true,
+        sourceCacheAgeMs: ageMs
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveOfficialMarketCache(cacheKey, result, options) {
+  const now = new Date().toISOString();
+  getDatabase()
+    .prepare(`
+      INSERT INTO official_market_cache (cache_key, fetched_at, market_mode, region, payload_json)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(cache_key) DO UPDATE SET
+        fetched_at = excluded.fetched_at,
+        market_mode = excluded.market_mode,
+        region = excluded.region,
+        payload_json = excluded.payload_json
+    `)
+    .run(
+      cacheKey,
+      now,
+      result.totals.searchMode || options.marketMode || "",
+      options.region || "kuopio-hub",
+      JSON.stringify(result)
+    );
 }
 
 function mergeCompanies(companies) {
@@ -139,6 +215,11 @@ export async function fetchOfficialMarketData(options) {
     ? [undefined]
     : cities;
   const maxPages = options.maxPages ?? 2;
+  const cacheKey = officialCacheKey({ options, range, cities, profile, maxPages });
+  if (shouldReadOfficialSourceCache(options)) {
+    const cached = readOfficialMarketCache(cacheKey);
+    if (cached) return cached;
+  }
 
   const companyRuns = [];
   const noticeRuns = [];
@@ -192,7 +273,7 @@ export async function fetchOfficialMarketData(options) {
     ...noticeRuns.flatMap((run) => run.items)
   ]);
 
-  return {
+  const result = {
     range,
     marketArea: {
       label: marketAreaLabel(options.region || "kuopio-hub"),
@@ -230,6 +311,10 @@ export async function fetchOfficialMarketData(options) {
       }
     ]
   };
+  if (useOfficialSourceCache(options) && (companies.length > 0 || errors.length === 0)) {
+    saveOfficialMarketCache(cacheKey, result, options);
+  }
+  return result;
 }
 
 export async function fetchFinancialPeriods(businessId) {
@@ -254,6 +339,8 @@ export async function fetchFinancialStatementXml(businessId, financialDate) {
       url,
       xml: await response.text()
     };
+  } catch (error) {
+    throw new Error(describeFetchError(error, url));
   } finally {
     timeout.clear();
   }

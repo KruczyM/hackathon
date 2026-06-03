@@ -104,6 +104,23 @@ test("employeeSegment separates mid-market from enterprise companies", () => {
   assert.equal(employeeSegment({ employeeCount: "6594" }).value, "enterprise");
 });
 
+test("employeeSegment uses financial scale proxy only when employee count is missing", () => {
+  const proxyOnly = employeeSegment({
+    organizationScaleProxy: "large_opportunity_proxy",
+    organizationScaleProxyLabel: "Financial scale proxy: large candidate",
+    organizationScaleProxySourceUrl: "https://avoindata.prh.fi/fi/financial-statements",
+    organizationScaleProxyEvidence: "net sales EUR 12.5M; not an employee count."
+  });
+  assert.equal(proxyOnly.value, "large_opportunity_proxy");
+  assert.equal(proxyOnly.isProxy, true);
+
+  const employeesWin = employeeSegment({
+    employeeCount: "120",
+    organizationScaleProxy: "large_opportunity_proxy"
+  });
+  assert.equal(employeesWin.value, "mid_market");
+});
+
 test("enterprise companies need stronger evidence before becoming hot", () => {
   const lead = buildLead(exampleCompany(), {
     range: { start: "2026-05-01", end: "2026-06-03" },

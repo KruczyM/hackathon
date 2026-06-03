@@ -17,6 +17,7 @@ const {
   saveEnrichmentCache
 } = await import("../server/agents/companyCacheAgent.js");
 const { applyGrowthDetection, resetGrowthHistory } = await import("../server/agents/companyGrowthAgent.js");
+const { fetchOfficialMarketData } = await import("../server/agents/prhSourceAgent.js");
 
 after(async () => {
   closeDatabase();
@@ -109,6 +110,48 @@ test("company enrichment cache reads and writes SQLite rows", async () => {
   assert.equal(status.totalCompaniesCached, 1);
   assert.equal(status.recentRuns[0].source, "test");
   assert.equal(status.dailyJournal[0].modes.includes("new-changes"), true);
+});
+
+test("official market data cache avoids repeated PRH/YTJ fetches for identical fresh queries", async () => {
+  await resetCompanyCache();
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      async json() {
+        return {
+          totalResults: 1,
+          companies: [company()]
+        };
+      }
+    };
+  };
+
+  try {
+    const query = {
+      marketMode: "listed-growth",
+      region: "whole-finland",
+      companyForm: "OYJ",
+      days: 30,
+      range: { start: "2026-05-04", end: "2026-06-03" },
+      maxPages: 1,
+      useCache: true
+    };
+    const first = await fetchOfficialMarketData(query);
+    const second = await fetchOfficialMarketData(query);
+    const refreshed = await fetchOfficialMarketData({ ...query, refreshCache: true });
+
+    assert.equal(calls, 2);
+    assert.equal(first.companies.length, 1);
+    assert.equal(second.companies.length, 1);
+    assert.equal(second.sourceCache.status, "hit");
+    assert.equal(second.totals.sourceCacheHit, true);
+    assert.equal(refreshed.sourceCache, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("growth snapshots use the previous SQLite row for jump detection", async () => {

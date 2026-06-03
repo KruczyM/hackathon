@@ -4,9 +4,9 @@ dist/
 .env.*
 !.env.example
 data/*.json
-data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+data/novapolis-db-test-*/
 .claude/
 copy/
 npm-debug.log*

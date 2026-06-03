@@ -43,6 +43,30 @@ function parseJson(text) {
   }
 }
 
+function cleanClaudeText(value) {
+  return String(value || "")
+    .replace(/Do not claim operational expansion from price action alone;?\s*/gi, "")
+    .replace(/Manual verification needed before outreach\.?/gi, "Manual verification is required before outreach.")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function reviewText(...values) {
+  for (const value of values) {
+    const cleaned = cleanClaudeText(value);
+    if (cleaned) return cleaned;
+  }
+  return "";
+}
+
+function manualReviewFallback(lead, review) {
+  const signal = lead.signals.find((item) => item.type === "listed_market_sustained_growth" || item.type === "listed_market_jump") ||
+    lead.signals.find((item) => item.sourceUrl);
+  const signalText = signal ? `${signal.label}: ${signal.detail}` : "sourced lead evidence is available";
+  const missing = review?.missingFields?.length ? ` Missing evidence: ${review.missingFields.join(", ")}.` : "";
+  return `${lead.company.name} has ${signalText}. Treat this as a manual qualification lead: verify the official website, public business contact route and operational context before outreach.${missing}`;
+}
+
 async function callClaude(leads, context, apiKey) {
   const response = await fetch(API_URL, {
     method: "POST",
@@ -104,17 +128,18 @@ async function callClaude(leads, context, apiKey) {
 export async function verifyLeadsWithClaude(leads, context) {
   const enabled = context.claude === true;
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!enabled) {
-    return { leads, meta: { enabled: false, status: "disabled" } };
-  }
-  if (!apiKey) {
-    return { leads, meta: { enabled: true, status: "missing_api_key" } };
-  }
-
   const limit = Math.min(Number.parseInt(context.claudeLimit, 10) || 5, 12);
   const target = leads.slice(0, limit);
+  const submittedBusinessIds = target.map((lead) => lead.company.businessId).filter(Boolean);
+  if (!enabled) {
+    return { leads, meta: { enabled: false, status: "disabled", candidateLeads: leads.length, requestedLimit: limit } };
+  }
+  if (!apiKey) {
+    return { leads, meta: { enabled: true, status: "missing_api_key", candidateLeads: leads.length, requestedLimit: limit } };
+  }
+
   if (target.length === 0) {
-    return { leads, meta: { enabled: true, status: "no_leads" } };
+    return { leads, meta: { enabled: true, status: "no_leads", candidateLeads: leads.length, requestedLimit: limit } };
   }
 
   try {
@@ -126,6 +151,10 @@ export async function verifyLeadsWithClaude(leads, context) {
           enabled: true,
           status: "parse_error",
           model: context.claudeModel || DEFAULT_MODEL,
+          candidateLeads: leads.length,
+          submittedLeads: target.length,
+          requestedLimit: limit,
+          submittedBusinessIds,
           reviewedLeads: 0,
           message: "Claude response could not be parsed as the expected JSON array."
         }
@@ -135,15 +164,22 @@ export async function verifyLeadsWithClaude(leads, context) {
     const enriched = leads.map((lead) => {
       const review = reviewMap.get(lead.company.businessId);
       if (!review) return lead;
-      const customerFacingPitch = lead.outreachReadiness === "Ready" ? (review.customerFacingPitch || null) : null;
+      const customerFacingPitch = lead.outreachReadiness === "Ready" ? (cleanClaudeText(review.customerFacingPitch) || null) : null;
+      const tailoredPitchAngle = reviewText(
+        review.tailoredPitchAngle,
+        review.tailoredPitch,
+        review.outreachAngle,
+        review.newsletterLine,
+        manualReviewFallback(lead, review)
+      );
       return {
         ...lead,
-        tailoredPitchAngle: review.tailoredPitchAngle || review.tailoredPitch || lead.tailoredPitchAngle,
+        tailoredPitchAngle,
         customerFacingPitch,
-        pitch: review.tailoredPitchAngle || review.tailoredPitch || lead.pitch,
-        newsletterLine: review.newsletterLine || review.outreachAngle || "",
+        pitch: tailoredPitchAngle || lead.pitch,
+        newsletterLine: cleanClaudeText(review.newsletterLine || review.outreachAngle || ""),
         agentReview: review,
-        recommendedAction: review.outreachAngle || lead.recommendedAction
+        recommendedAction: cleanClaudeText(review.outreachAngle) || lead.recommendedAction
       };
     });
     return {
@@ -152,6 +188,11 @@ export async function verifyLeadsWithClaude(leads, context) {
         enabled: true,
         status: "ok",
         model: context.claudeModel || DEFAULT_MODEL,
+        candidateLeads: leads.length,
+        submittedLeads: target.length,
+        requestedLimit: limit,
+        submittedBusinessIds,
+        reviewedBusinessIds: reviews.map((review) => review.businessId).filter(Boolean),
         reviewedLeads: reviews.length
       }
     };
@@ -161,6 +202,10 @@ export async function verifyLeadsWithClaude(leads, context) {
       meta: {
         enabled: true,
         status: "error",
+        candidateLeads: leads.length,
+        submittedLeads: target.length,
+        requestedLimit: limit,
+        submittedBusinessIds,
         message: error.message
       }
     };

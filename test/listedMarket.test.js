@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   analyzePriceMomentum,
+  extractYahooEmployeeCount,
   extractYahooPoints,
   normalizeCompanyName,
   selectBestInstrument
@@ -10,6 +11,20 @@ import {
 test("normalizes Finnish public company suffixes", () => {
   assert.equal(normalizeCompanyName("Nokia Oyj"), "nokia");
   assert.equal(normalizeCompanyName("Qt Group Oyj"), "qt");
+});
+
+test("extractYahooEmployeeCount reads fullTimeEmployees from quoteSummary assetProfile", () => {
+  const count = extractYahooEmployeeCount({
+    quoteSummary: {
+      result: [{
+        assetProfile: {
+          fullTimeEmployees: 86148
+        }
+      }]
+    }
+  });
+
+  assert.equal(count, 86148);
 });
 
 test("selectBestInstrument avoids nearby but different company names", () => {

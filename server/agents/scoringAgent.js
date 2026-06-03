@@ -200,7 +200,7 @@ function focusFit(company, focus) {
 
 function employeeScore(enrichment) {
   const count = Number.parseInt(enrichment?.employeeCount, 10);
-  if (!Number.isFinite(count)) return -5;
+  if (!Number.isFinite(count)) return scaleProxyScore(enrichment);
   if (count >= 50) return 18;
   if (count >= 10) return 12;
   if (count >= 3) return 6;
@@ -210,6 +210,16 @@ function employeeScore(enrichment) {
 export function companySizeEstimate(enrichment) {
   const count = Number.parseInt(enrichment?.employeeCount, 10);
   if (!Number.isFinite(count)) {
+    const proxy = scaleProxySegment(enrichment);
+    if (proxy) {
+      return {
+        value: proxy.label,
+        employeeCountSource: proxy.sourceName,
+        sourceUrl: proxy.sourceUrl,
+        scoreImpact: proxy.scoreImpact,
+        note: proxy.evidence
+      };
+    }
     return {
       value: "unknown",
       employeeCountSource: "missing",
@@ -226,6 +236,8 @@ export function companySizeEstimate(enrichment) {
 export function employeeSegment(enrichment) {
   const count = Number.parseInt(enrichment?.employeeCount, 10);
   if (!Number.isFinite(count)) {
+    const proxy = scaleProxySegment(enrichment);
+    if (proxy) return proxy;
     return {
       value: "unknown",
       label: "Unknown size",
@@ -241,6 +253,45 @@ export function employeeSegment(enrichment) {
   if (count >= 5000) return segment("enterprise", "5000+ enterprise / moloch", "watch", true, 5000, null);
   if (count >= 11) return segment("small_scaling", "11-49 small scaling company", "watch", false, 11, 49);
   return segment("micro", "1-10 micro company", "watch", false, 1, 10);
+}
+
+function scaleProxyScore(enrichment) {
+  const proxy = scaleProxySegment(enrichment);
+  if (!proxy) return -5;
+  if (proxy.value === "large_opportunity_proxy") return 14;
+  if (proxy.value === "mid_market_proxy") return 10;
+  return 6;
+}
+
+function scaleProxySegment(enrichment) {
+  const value = enrichment?.organizationScaleProxy || "";
+  if (!value) return null;
+  if (value === "mid_market_proxy") {
+    return proxySegment(enrichment, value, "Financial scale proxy: mid-market candidate", "proxy", false, 10);
+  }
+  if (value === "large_opportunity_proxy") {
+    return proxySegment(enrichment, value, "Financial scale proxy: large candidate", "proxy-secondary", false, 14);
+  }
+  if (value === "enterprise_watch_proxy") {
+    return proxySegment(enrichment, value, "Financial scale proxy: enterprise watch", "proxy-watch", true, 6);
+  }
+  return null;
+}
+
+function proxySegment(enrichment, value, fallbackLabel, targetFit, enterprisePenalty, scoreImpact) {
+  return {
+    value,
+    label: enrichment.organizationScaleProxyLabel || fallbackLabel,
+    targetFit,
+    enterprisePenalty,
+    minEmployees: null,
+    maxEmployees: null,
+    isProxy: true,
+    sourceName: enrichment.organizationScaleProxySourceName || "PRH XBRL financial statement",
+    sourceUrl: enrichment.organizationScaleProxySourceUrl || "",
+    evidence: enrichment.organizationScaleProxyEvidence || "Official financial statement scale proxy; not an employee count.",
+    scoreImpact
+  };
 }
 
 function segment(value, label, targetFit, enterprisePenalty, minEmployees, maxEmployees) {
@@ -417,7 +468,7 @@ function dataConfidence(enrichment, signals, outreachReadiness) {
     verifiedWebsite(enrichment),
     hasPublicBusinessContact(enrichment),
     Boolean(enrichment?.decisionMakers?.length),
-    Boolean(enrichment?.employeeCount),
+    Boolean(enrichment?.employeeCount || enrichment?.organizationScaleProxy),
     growthHiringSignal(signals).level !== "none"
   ].filter(Boolean).length;
 
@@ -436,6 +487,7 @@ function novapolisAngles(company, signals, enrichment) {
   if (signals.some((signal) => signal.type === "new_company")) angles.push("New entity may still be setting up operating routines, supplier relationships and local business services.");
   if (signals.some((signal) => signal.type === "registered_notice")) angles.push("Recent official registry activity gives a timely reason to contact.");
   if (enrichment?.employeeCount) angles.push(`Employee count signal: ${enrichment.employeeCount} from ${enrichment.employeeCountSourceName || "enrichment source"}.`);
+  if (!enrichment?.employeeCount && enrichment?.organizationScaleProxy) angles.push(`Financial scale proxy: ${enrichment.organizationScaleProxyEvidence}`);
   if (enrichment?.decisionMakers?.length) angles.push(`Possible decision maker found: ${formatPerson(enrichment.decisionMakers[0])}.`);
   if (angles.length === 0) angles.push("Keep on watchlist until a stronger growth or change signal appears.");
   return angles.slice(0, 4);
@@ -498,6 +550,7 @@ function selectedBecause(company, signals, enrichment) {
   if (address(company)) reasons.push(`Located at ${address(company)}.`);
   if (sectorFit(company) > 0) reasons.push(`Office-compatible industry: ${businessLine(company).description || businessLine(company).code}.`);
   if (enrichment?.employeeCount) reasons.push(`Official employee count ${enrichment.employeeCount} from ${enrichment.employeeCountSourceName || "source attached"}.`);
+  if (!enrichment?.employeeCount && enrichment?.organizationScaleProxy) reasons.push(`${enrichment.organizationScaleProxyLabel || "Financial scale proxy"} from ${enrichment.organizationScaleProxySourceName || "PRH XBRL financial statement"}: ${enrichment.organizationScaleProxyAmountLabel || enrichment.organizationScaleProxyEvidence}.`);
   if (enrichment?.decisionMakers?.length) reasons.push(`Decision maker found from ${enrichment.decisionMakers[0].sourceName || "public source"}.`);
   if (growthHiringSignal(signals).level !== "none") reasons.push(`Growth/hiring signal: ${growthHiringSignal(signals).level}.`);
   return reasons;
@@ -507,7 +560,8 @@ function complianceWarnings(enrichment, outreachReadiness) {
   const warnings = [];
   if (enrichment?.decisionMakers?.length) warnings.push("Decision maker is personal data; B2B legitimate-interest review is required before outreach.");
   if (outreachReadiness !== "Ready") warnings.push("No verified public business contact channel; automated outreach is not allowed.");
-  if (!enrichment?.employeeCount) warnings.push("Employee count missing; do not claim team size or hiring.");
+  if (!enrichment?.employeeCount && enrichment?.organizationScaleProxy) warnings.push("Employee count missing; financial scale proxy is not a team-size claim.");
+  if (!enrichment?.employeeCount && !enrichment?.organizationScaleProxy) warnings.push("Employee count missing; do not claim team size or hiring.");
   return warnings;
 }
 
@@ -596,14 +650,15 @@ function pitch(company, signals, enrichment) {
 function enrichmentSignals(company, enrichment) {
   if (!enrichment) return [];
   const signals = [];
-  if (enrichment.employeeCount || enrichment.decisionMakers?.length || enrichment.emails?.length || enrichment.phones?.length) {
+  if (enrichment.employeeCount || enrichment.organizationScaleProxy || enrichment.decisionMakers?.length || enrichment.emails?.length || enrichment.phones?.length) {
     signals.push(makeSignal(company, {
       type: "enrichment",
-      label: "Contact/enrichment available",
+      label: "Sourced enrichment available",
       date: "current-enrichment",
       title: `${currentName(company)} has enrichment data`,
       detail: [
         enrichment.employeeCount ? `Employees: ${enrichment.employeeCount} (${enrichment.employeeCountSourceName || "source attached"})` : "",
+        !enrichment.employeeCount && enrichment.organizationScaleProxy ? `Scale proxy: ${enrichment.organizationScaleProxyLabel || enrichment.organizationScaleProxy} (${enrichment.organizationScaleProxyAmountLabel || enrichment.organizationScaleProxyMetricLabel || "source attached"})` : "",
         enrichment.decisionMakers?.length ? `Decision makers: ${enrichment.decisionMakers.map(formatPerson).join("; ")}` : "",
         enrichment.emails?.length ? `Emails: ${enrichment.emails.join("; ")}` : "",
         enrichment.verificationEvidence?.length ? `Source verification: ${enrichment.verificationEvidence[0]}` : ""
@@ -615,6 +670,8 @@ function enrichmentSignals(company, enrichment) {
       idSeed: stableHash([
         enrichment.employeeCount || "",
         enrichment.employeeCountSourceUrl || "",
+        enrichment.organizationScaleProxy || "",
+        enrichment.organizationScaleProxySourceUrl || "",
         ...(enrichment.decisionMakers || []).map(formatPerson),
         ...(enrichment.emails || []),
         ...(enrichment.phones || [])

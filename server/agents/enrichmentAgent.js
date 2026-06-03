@@ -60,6 +60,16 @@ function emptyEnrichment() {
     employeeCountSourceName: "",
     employeeCountSourceUrl: "",
     employeeCountEvidence: "",
+    organizationScaleProxy: "",
+    organizationScaleProxyLabel: "",
+    organizationScaleProxyMetric: "",
+    organizationScaleProxyMetricLabel: "",
+    organizationScaleProxyAmount: "",
+    organizationScaleProxyAmountLabel: "",
+    organizationScaleProxySourceName: "",
+    organizationScaleProxySourceUrl: "",
+    organizationScaleProxyEvidence: "",
+    organizationScaleProxyConfidence: "",
     currentEmployeeCount: "",
     currentEmployeeCountSourceName: "",
     currentEmployeeCountSourceUrl: "",
@@ -365,6 +375,7 @@ function mergeEnrichment(...items) {
   const currentEmployees = valid.find((item) => item.currentEmployeeCount);
   const anyEmployees = valid.find((item) => item.employeeCount);
   const employee = currentEmployees || officialEmployees || anyEmployees;
+  const scaleProxy = valid.find((item) => item.organizationScaleProxy);
   const website = valid.find((item) => item.companyWebsite && item.verificationStatus === "official-company-website-verified") || valid.find((item) => item.companyWebsite);
   const contactSource = valid.find((item) => (item.emails?.length || item.phones?.length) && (item.contactSourceUrl || item.sourceUrl));
   const peopleSource = valid.find((item) => item.decisionMakers?.length && item.sourceUrl);
@@ -372,7 +383,7 @@ function mergeEnrichment(...items) {
     valid.find((item) => item.companyWebsite && item.verificationStatus) ||
     valid.find((item) => item.verificationStatus);
   const verificationOrder = [verification, ...valid.filter((item) => item !== verification)].filter(Boolean);
-  const primary = peopleSource || contactSource || employee || valid.find((item) => item.sourceName);
+  const primary = peopleSource || contactSource || employee || scaleProxy || valid.find((item) => item.sourceName);
   const notes = valid.map((item) => item.notes).filter(Boolean);
   const investments = valid.map((item) => item.investments).filter(Boolean);
 
@@ -382,6 +393,16 @@ function mergeEnrichment(...items) {
     employeeCountSourceName: employee?.employeeCountSourceName || "",
     employeeCountSourceUrl: employee?.employeeCountSourceUrl || "",
     employeeCountEvidence: employee?.employeeCountEvidence || "",
+    organizationScaleProxy: scaleProxy?.organizationScaleProxy || "",
+    organizationScaleProxyLabel: scaleProxy?.organizationScaleProxyLabel || "",
+    organizationScaleProxyMetric: scaleProxy?.organizationScaleProxyMetric || "",
+    organizationScaleProxyMetricLabel: scaleProxy?.organizationScaleProxyMetricLabel || "",
+    organizationScaleProxyAmount: scaleProxy?.organizationScaleProxyAmount || "",
+    organizationScaleProxyAmountLabel: scaleProxy?.organizationScaleProxyAmountLabel || "",
+    organizationScaleProxySourceName: scaleProxy?.organizationScaleProxySourceName || "",
+    organizationScaleProxySourceUrl: scaleProxy?.organizationScaleProxySourceUrl || "",
+    organizationScaleProxyEvidence: scaleProxy?.organizationScaleProxyEvidence || "",
+    organizationScaleProxyConfidence: scaleProxy?.organizationScaleProxyConfidence || "",
     currentEmployeeCount: currentEmployees?.currentEmployeeCount || "",
     currentEmployeeCountSourceName: currentEmployees?.currentEmployeeCountSourceName || "",
     currentEmployeeCountSourceUrl: currentEmployees?.currentEmployeeCountSourceUrl || "",
@@ -415,6 +436,7 @@ export async function enrichCompanies(companies, options = {}) {
   const virreLimit = Math.min(Number.parseInt(options.virreLimit, 10) || 12, companies.length);
   const currentEmployeeSearch = options.currentEmployeeSearch === true || options.currentEmployeeSearch === "true";
   const currentEmployeeSearchLimit = Math.min(Number.parseInt(options.currentEmployeeSearchLimit, 10) || 5, companies.length);
+  const employeeFallbackMap = options.employeeFallbackMap instanceof Map ? options.employeeFallbackMap : new Map();
   const result = new Map();
   const disabledVirreStats = {
     status: "disabled",
@@ -461,8 +483,11 @@ export async function enrichCompanies(companies, options = {}) {
       });
     }
 
+    const employeeFallback = employeeFallbackMap.get(businessId);
     const [financial, discovery] = await Promise.all([
-      fetchOfficialEmployeeCount(company),
+      employeeFallback?.employeeCount
+        ? Promise.resolve({ enrichment: employeeFallback, stats: { status: "employee_fallback", sourceName: employeeFallback.employeeCountSourceName } })
+        : fetchOfficialEmployeeCount(company),
       publicWeb && websiteDiscovery && index < websiteDiscoveryLimit
         ? discoverCompanyWebsite(company, virreHit || {}, { enabled: true, maxCandidates: prhWebsite || virreWebsite ? 1 : 8, maxPages: 5 })
         : Promise.resolve({ website: null, stats: { status: publicWeb ? "skipped" : "disabled", candidatesChecked: 0, verified: 0, conflicts: 0, notFound: 0 } })
@@ -485,6 +510,8 @@ export async function enrichCompanies(companies, options = {}) {
     financials: {
       checked: 0,
       employeeCountsFound: 0,
+      scaleProxiesFound: 0,
+      employeeFallbacksUsed: 0,
       noDigitalFinancials: 0,
       noEmployeeFact: 0,
       errors: []
@@ -514,6 +541,8 @@ export async function enrichCompanies(companies, options = {}) {
       if (meta?.financial) {
         stats.financials.checked += 1;
         if (meta.financial.status === "ok") stats.financials.employeeCountsFound += 1;
+        if (meta.financial.status === "employee_fallback") stats.financials.employeeFallbacksUsed += 1;
+        if (meta.financial.scaleProxyFound || meta.financial.status === "scale_proxy") stats.financials.scaleProxiesFound += 1;
         if (meta.financial.status === "no_digital_financials") stats.financials.noDigitalFinancials += 1;
         if (meta.financial.status === "no_employee_fact") stats.financials.noEmployeeFact += 1;
         if (meta.financial.status === "error") stats.financials.errors.push(meta.financial.message);

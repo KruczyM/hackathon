@@ -13,7 +13,7 @@ export function getDatabase() {
   const dbPath = path.resolve(process.env.NOVAPOLIS_DB_PATH || DEFAULT_DB_PATH);
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   database = new DatabaseSync(dbPath);
-  database.exec("PRAGMA journal_mode = WAL");
+  database.exec("PRAGMA journal_mode = DELETE");
   database.exec("PRAGMA synchronous = NORMAL");
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("PRAGMA busy_timeout = 5000");
@@ -107,6 +107,17 @@ function initializeSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_company_enrichment_cache_fetched_at
       ON company_enrichment_cache (fetched_at);
+
+    CREATE TABLE IF NOT EXISTS official_market_cache (
+      cache_key TEXT PRIMARY KEY,
+      fetched_at TEXT NOT NULL,
+      market_mode TEXT,
+      region TEXT,
+      payload_json TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_official_market_cache_fetched_at
+      ON official_market_cache (fetched_at);
 
     CREATE TABLE IF NOT EXISTS company_cache_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

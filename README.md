@@ -5,7 +5,7 @@ No-login prototype for Novapolis Hackathon challenge 1: warm lead generation.
 The app runs an automated agent pipeline:
 
 1. Source agent: gets official Finnish company data and change notices from PRH/YTJ.
-2. Financials agent: reads PRH/XBRL digital financial statements and extracts official employee-count facts when available.
+2. Financials agent: reads PRH/XBRL digital financial statements and extracts official employee-count facts when available; if employee count is missing, it can extract official financial scale proxy facts such as net sales or balance sheet total.
 3. Virre agent: downloads free official Trade Register extract PDFs and parses board/CEO names.
 4. Website discovery agent: guesses likely company domains and verifies fetched pages by Business ID/name/address evidence.
 5. Enrichment agent: scans verified company websites for public contacts and people.
@@ -19,9 +19,9 @@ The app runs an automated agent pipeline:
 The UI exposes one search mode at a time:
 
 - `New / changed`: recent company registrations, official PRH updates and registered notices.
-- `Mid-market`: existing `Oy`/`Oyj` companies with sourced `50-249` employee counts.
-- `Large opportunities`: existing companies with sourced `250-999` employee counts.
-- `Enterprise watch`: existing companies with sourced `1000+` employee counts, kept separate from core hot leads.
+- `Mid-market`: existing `Oy`/`Oyj` companies with sourced `50-249` employee counts or official financial scale proxy.
+- `Large opportunities`: existing companies with sourced `250-999` employee counts or official financial scale proxy.
+- `Enterprise watch`: existing companies with sourced `1000+` employee counts or enterprise-scale financial proxy, kept separate from core hot leads.
 - `Listed growth`: region-registered `Oyj` companies matched to Nasdaq Helsinki, then Yahoo Finance daily prices are checked for sustained growth or a large jump.
 
 ## Run
@@ -69,6 +69,8 @@ PRH/YTJ does not return a raw employee count in the normal company response. The
 
 The financials agent then searches the XML facts for employee/personnel count facts. When found, this is shown as `PRH XBRL financial statement` and takes priority over website employee estimates.
 
+If employee count is missing, the same official statement is checked for financial scale facts: net sales/revenue, balance sheet total/total assets, or personnel expenses. These facts can qualify a company for mid-market, large-opportunity or enterprise-watch modes as a `financial scale proxy`. This is not an employee-count claim and must not be used to say how many people the company employs.
+
 ## Current Employee Web Search
 
 When `Agent employee search` is enabled, the app runs an extra current-employee search:
@@ -102,6 +104,7 @@ The website discovery agent uses only free, no-key checks:
 - If PRH or Virre already returns a website, the app fetches it and keeps source metadata visible.
 - Virre PDF/details are collected before website discovery for the top scanned leads, so discovered website checks can use Virre decision makers and Virre website fields as supporting context.
 - If no website is returned, the app generates likely domains from the legal company name and auxiliary names, for example `Borealis Acute Operations Oy` can produce `borealisacuteoperations.fi`, `borealisacute.fi`, `.com`, `.net`, and `.eu` variants.
+- Legal suffixes such as `Oy` and `Oyj` are removed for domain candidates, while brand words such as `Group` are still tried. For example `Eagle Filters Group Oyj` produces `eaglefiltersgroup.fi`, `eaglefiltersgroup.com`, `eaglefilters.fi`, and `eaglefilters.com`.
 - Candidate pages are fetched from homepage/contact/about/company paths.
 - A site is accepted as verified only when fetched page evidence matches the company, preferably exact `Y-tunnus` / Business ID. Company name, auxiliary name, address, city, decision maker name and matching email domain add supporting confidence.
 - Commercial directories, social networks and register mirrors are not treated as official websites.
@@ -135,14 +138,17 @@ The app stores runtime state in a local SQLite database at `data/novapolis.sqlit
 - `seen_signals`: signal IDs already shown to the user.
 - `displayed_companies`: companies already displayed in the UI.
 - `company_growth_snapshots`: latest growth metrics by Business ID.
+- `official_market_cache`: 12-hour source snapshots for exact PRH/YTJ market queries.
 - `company_enrichment_cache`: cached enrichment facts by Business ID.
 - `company_cache_runs` and `company_cache_daily_journal`: cache refresh audit data.
 
 The previous `data/*.json` files are no longer read by the application. New data is collected from scratch into SQLite.
 
-When `Use cached enrichment` is enabled and the cache journal shows that enrichment was refreshed today, the radar runs in fast cache-only mode for enrichment: it compares candidate Business IDs against SQLite cache rows, returns stored enrichment for cached companies, and skips live Virre/website/web enrichment for missing or stale entries. Turn off `Use cached enrichment` to force a live refresh.
+When `Use cached enrichment` is enabled and the cache is younger than 12 hours, the radar first tries an exact PRH/YTJ source snapshot from `official_market_cache`. If the same query was prefetched or run recently, the source-agent response is served from SQLite instead of calling PRH/YTJ again. Then enrichment runs in fast cache-only mode: it compares candidate Business IDs against SQLite cache rows, returns only rows whose own `fetched_at` is also younger than 12 hours, and skips live Virre/website/current-employee/Yahoo/listed enrichment endpoints for missing or stale entries. Turn off `Use cached enrichment` to force a live refresh.
 
-Background prefetch runs `whole-finland` scans for the configured modes and writes cache, but it calls the radar with `recordDisplay=false`. That means prefetched companies are not marked as displayed, so the next user search can still show them as fresh results.
+Background prefetch runs `whole-finland` scans for the configured modes and writes cache, but it calls the radar with `recordDisplay=false`. That means prefetched companies are not marked as displayed, so the next user search can still show them as fresh results. Prefetched listed-company Yahoo employee fallbacks and listed-market signals are saved in `company_enrichment_cache.enrichment_json`, so subsequent cache-only runs can reuse them without calling Yahoo again.
+
+`POST /api/prefetch/run?force=true` bypasses the 12-hour source/enrichment cache reads and refreshes live endpoints again, while still writing the refreshed PRH/YTJ snapshots, Yahoo employee fallbacks and listed-market signals back to SQLite.
 
 Useful endpoints:
 
@@ -153,7 +159,7 @@ POST /api/cache/reset
 POST /api/memory/reset
 ```
 
-`POST /api/cache/reset` clears enrichment cache tables. `POST /api/memory/reset` clears displayed-company memory and growth snapshots.
+`POST /api/cache/reset` clears source snapshots and enrichment cache tables. `POST /api/memory/reset` clears displayed-company memory and growth snapshots.
 
 ## Listed-Market Growth
 
@@ -162,6 +168,7 @@ The app uses only free, no-key public sources for listed-company momentum:
 - PRH/YTJ searches `OYJ` companies in the selected region without a date filter so older public companies can still be checked when `Listed growth` mode is selected.
 - nfin.dev Nasdaq Nordic API loads Finnish listed shares and validates the PRH company-to-instrument match.
 - Yahoo Finance chart API is used for daily `.HE` price history after the ticker is derived automatically from the Nasdaq Helsinki symbol.
+- Yahoo Finance quoteSummary `assetProfile.fullTimeEmployees` is used as a non-official fallback employee-count source for matched listed companies when PRH/XBRL or company-owned employee evidence is missing.
 
 The listed-market agent adds a signal only when daily history supports either:
 
@@ -170,15 +177,21 @@ The listed-market agent adds a signal only when daily history supports either:
 
 Price momentum is treated as a market-attention signal, not proof of hiring, revenue growth, funding or office expansion. Claude may explain the sourced price movement, but it must not infer unsourced operational claims.
 
+Yahoo Finance employee counts are treated as public market profile data, not official register data. They can help avoid empty employee fields for listed companies, but PRH/XBRL and company-owned sources still take priority.
+
+In medium/large/enterprise scans, `Oyj` candidates are checked against Nasdaq/Yahoo first as a quick employee-count fallback. If Yahoo returns `fullTimeEmployees`, the slower PRH/XBRL employee-count lookup is skipped for that listed company in the current run. The source remains labeled as Yahoo public market profile data.
+
+When the SQLite cache is younger than 12 hours, listed-growth mode rebuilds its listed signals from cached `listedMarketSignals` instead of calling nfin/Yahoo. A company appears in cache-only listed-growth only after a previous live listed-growth run or prefetch has saved that signal.
+
 ## Size Segment Modes
 
-Size segment modes do not use the recent-registration date filter. They pull existing `Oy`/`Oyj` companies from the selected area, run enrichment/cache on the pre-ranked candidate pool, and keep companies only when sourced employee evidence matches the selected segment:
+Size segment modes do not use the recent-registration date filter. They pull existing `Oy`/`Oyj` companies from the selected area, run enrichment/cache on the pre-ranked candidate pool, and keep companies when sourced employee evidence or official financial scale proxy matches the selected segment:
 
-- `Mid-market`: `50-249`.
-- `Large opportunities`: `250-999`.
-- `Enterprise watch`: `1000+`.
+- `Mid-market`: `50-249` employees or mid-market financial scale proxy.
+- `Large opportunities`: `250-999` employees or large financial scale proxy.
+- `Enterprise watch`: `1000+` employees or enterprise-watch financial scale proxy.
 
-The employee-count source URL remains visible in the final lead card.
+The employee-count or scale-proxy source URL remains visible in the final lead card. Financial proxy labels are deliberately shown as proxy evidence, not as headcount.
 
 ## Windows Autostart
 
@@ -208,6 +221,8 @@ The task starts the backend through `npm start`, opens `http://127.0.0.1:8787`, 
 
 Claude does not fetch private contact databases by itself. It verifies and improves lead reasoning from evidence collected by the source and enrichment agents.
 
+Claude receives only the final visible top leads after memory filtering, capped by `claudeLimit` and never above 12 records. The backend includes submitted Business IDs in the `claude` metadata for auditability.
+
 ## Growth Detection
 
 The growth agent stores the latest snapshot per company in `company_growth_snapshots`.
@@ -225,8 +240,10 @@ Each growth signal is displayed as `Selected because: ...` so the reason for cho
 
 - PRH/YTJ is official but does not provide open company emails or phone numbers.
 - PRH/XBRL employee count is official only when a digital financial statement contains the relevant employee/personnel fact.
+- PRH/XBRL financial scale proxy is official financial-statement evidence, but it is not an employee count and must not be described as team size.
 - Virre responsible people are official only when extracted from the generated Trade Register extract PDF; birth dates from the PDF are not displayed.
 - Listed-market signals must include the matched instrument, price-history source URL, date and confidence.
+- Yahoo Finance employee count fallback must be labeled as public-market profile data and must not override PRH/XBRL or company-owned employee evidence.
 - The app never invents employee count, contacts, people, investments or hiring.
 - Missing data remains `missing source`.
 - Every displayed contact or employee count should include a source URL.

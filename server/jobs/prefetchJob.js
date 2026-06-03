@@ -1,7 +1,7 @@
 import { runRadar } from "../agents/orchestrator.js";
-import { getCompanyCacheStatus } from "../agents/companyCacheAgent.js";
+import { ENDPOINT_SKIP_CACHE_MS, getCompanyCacheStatus } from "../agents/companyCacheAgent.js";
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const PREFETCH_FRESH_MS = ENDPOINT_SKIP_CACHE_MS;
 const PREFETCH_MODES = (process.env.PREFETCH_MODES || "new-changes,mid-market,large-opportunities,listed-growth")
   .split(",")
   .map((mode) => mode.trim())
@@ -20,7 +20,8 @@ const state = {
 
 let runningPromise = null;
 
-function prefetchQuery(mode) {
+function prefetchQuery(mode, options = {}) {
+  const forceRefresh = options.force === true || options.force === "true";
   return {
     marketMode: mode,
     region: "whole-finland",
@@ -31,6 +32,7 @@ function prefetchQuery(mode) {
     includeSeen: "true",
     recordDisplay: "false",
     useCache: "true",
+    refreshCache: forceRefresh ? "true" : "false",
     publicWeb: "true",
     websiteDiscovery: "true",
     websiteDiscoveryLimit: "10",
@@ -44,12 +46,12 @@ function prefetchQuery(mode) {
   };
 }
 
-async function shouldRunDailyPrefetch(force) {
+async function shouldRunPrefetch(force) {
   if (force) return true;
   const cache = await getCompanyCacheStatus();
   const updatedAt = Date.parse(cache.updatedAt || "");
   if (!Number.isFinite(updatedAt)) return true;
-  return Date.now() - updatedAt > ONE_DAY_MS;
+  return Date.now() - updatedAt > PREFETCH_FRESH_MS;
 }
 
 export async function runPrefetchNow(options = {}) {
@@ -57,18 +59,20 @@ export async function runPrefetchNow(options = {}) {
 
   runningPromise = (async () => {
     const force = options.force === true || options.force === "true";
-    if (!(await shouldRunDailyPrefetch(force))) {
+    if (!(await shouldRunPrefetch(force))) {
       const cache = await getCompanyCacheStatus();
       state.status = "idle";
       state.lastError = "";
-      state.nextRunAt = new Date(Date.now() + ONE_DAY_MS).toISOString();
+      state.nextRunAt = new Date(Date.now() + PREFETCH_FRESH_MS).toISOString();
       state.lastRun = {
         skipped: true,
-        reason: "Company cache is still fresh.",
+        reason: `Company cache is still fresh for ${cache.cacheMaxEndpointSkipHours || 12}h endpoint skip.`,
         cacheUpdatedAt: cache.updatedAt,
         totalCompaniesCached: cache.totalCompaniesCached
       };
-      return statusSnapshot();
+      const snapshot = statusSnapshot();
+      runningPromise = null;
+      return snapshot;
     }
 
     state.status = "running";
@@ -77,6 +81,7 @@ export async function runPrefetchNow(options = {}) {
     state.lastError = "";
     const run = {
       startedAt: state.startedAt,
+      forcedRefresh: force,
       modes: [],
       totalLeadsPrepared: 0,
       totalCacheHits: 0,
@@ -86,14 +91,18 @@ export async function runPrefetchNow(options = {}) {
     try {
       for (const mode of PREFETCH_MODES) {
         state.activeMode = mode;
-        const result = await runRadar(prefetchQuery(mode));
+        const result = await runRadar(prefetchQuery(mode, { force }));
         const modeResult = {
           mode,
+          forcedRefresh: force,
           finishedAt: new Date().toISOString(),
           leadsPrepared: result.totals.rawLeads || result.totals.leads || 0,
           cacheHits: result.totals.cacheHits || 0,
           cacheSaved: result.totals.cacheSaved || 0,
-          companiesReturned: result.totals.companiesReturned || 0
+          companiesReturned: result.totals.companiesReturned || 0,
+          listedYahooEmployeeCounts: result.totals.listedYahooEmployeeCounts || 0,
+          listedCompaniesMatched: result.totals.listedCompaniesMatched || 0,
+          errors: (result.errors || []).slice(0, 6)
         };
         run.modes.push(modeResult);
         run.totalLeadsPrepared += modeResult.leadsPrepared;
@@ -103,7 +112,7 @@ export async function runPrefetchNow(options = {}) {
       state.status = "idle";
       state.activeMode = "";
       state.finishedAt = new Date().toISOString();
-      state.nextRunAt = new Date(Date.now() + ONE_DAY_MS).toISOString();
+      state.nextRunAt = new Date(Date.now() + PREFETCH_FRESH_MS).toISOString();
       run.finishedAt = state.finishedAt;
       state.lastRun = run;
       state.runs.push(run);
@@ -148,7 +157,7 @@ export function startPrefetchScheduler() {
       state.status = "error";
       state.lastError = error.message;
     });
-  }, ONE_DAY_MS);
+  }, PREFETCH_FRESH_MS);
 }
 
 function statusSnapshot() {

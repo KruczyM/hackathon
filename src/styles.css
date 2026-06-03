@@ -238,6 +238,14 @@ button {
   color: #263234;
 }
 
+.prefetch-errors {
+  display: grid;
+  flex-basis: 100%;
+  gap: 4px;
+  color: #8a1f1f;
+  font-size: 0.86rem;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

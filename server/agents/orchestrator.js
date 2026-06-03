@@ -7,7 +7,7 @@ import { applyMemory, filterLeadsWithUnseenSignals } from "./memoryAgent.js";
 import { buildNewsletter } from "./newsletterAgent.js";
 import { verifyLeadsWithClaude } from "./claudeVerifierAgent.js";
 import { applyGrowthDetection } from "./companyGrowthAgent.js";
-import { analyzeListedCompanyMomentum, LISTED_MARKET_SOURCES } from "./listedMarketAgent.js";
+import { analyzeListedCompanyMomentum, findListedCompanyEmployeeFallbacks, LISTED_MARKET_SOURCES } from "./listedMarketAgent.js";
 import { VIRRE_SOURCES } from "./virreAgent.js";
 import { WEBSITE_DISCOVERY_SOURCE } from "./websiteDiscoveryAgent.js";
 import { CURRENT_EMPLOYEE_SEARCH_SOURCE } from "./currentEmployeeSearchAgent.js";
@@ -92,6 +92,7 @@ function normalizeOptions(query = {}) {
     visibility: normalizeVisibility(query.visibility, query.includeSeen),
     recordDisplay: query.recordDisplay !== false && query.recordDisplay !== "false",
     useCache: query.useCache !== false && query.useCache !== "false",
+    refreshCache: query.refreshCache === true || query.refreshCache === "true",
     publicWeb: query.publicWeb !== false && query.publicWeb !== "false",
     websiteDiscovery: query.websiteDiscovery !== false && query.websiteDiscovery !== "false",
     websiteDiscoveryLimit: Number.parseInt(query.websiteDiscoveryLimit, 10) || modeDefaults.websiteDiscoveryLimit,
@@ -128,13 +129,31 @@ function businessId(company) {
 function disabledListedMarket() {
   return {
     map: new Map(),
+    enrichmentMap: new Map(),
     stats: {
       checked: 0,
       matched: 0,
       historyFetched: 0,
+      yahooProfilesFetched: 0,
+      yahooEmployeeCounts: 0,
       signals: 0,
       sustainedSignals: 0,
       jumpSignals: 0
+    },
+    errors: [],
+    status: "disabled"
+  };
+}
+
+function disabledListedEmployeeFallback() {
+  return {
+    enrichmentMap: new Map(),
+    stats: {
+      checked: 0,
+      matched: 0,
+      searchFallbacks: 0,
+      yahooProfilesFetched: 0,
+      yahooEmployeeCounts: 0
     },
     errors: [],
     status: "disabled"
@@ -160,6 +179,8 @@ function emptyEnrichmentStats() {
     financials: {
       checked: 0,
       employeeCountsFound: 0,
+      scaleProxiesFound: 0,
+      employeeFallbacksUsed: 0,
       noDigitalFinancials: 0,
       noEmployeeFact: 0,
       errors: []
@@ -203,6 +224,18 @@ function companiesFromLeads(companies, leads) {
     .filter(Boolean);
 }
 
+function uniqueCompaniesByBusinessId(companies) {
+  const seen = new Set();
+  const uniqueCompanies = [];
+  for (const company of companies) {
+    const id = businessId(company);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    uniqueCompanies.push(company);
+  }
+  return uniqueCompanies;
+}
+
 function hasListedMarketSignal(lead) {
   return lead.signals.some((signal) => signal.type === "listed_market_sustained_growth" || signal.type === "listed_market_jump");
 }
@@ -213,15 +246,97 @@ function isSizeSegmentMode(marketMode) {
 
 function isSizeSegmentLead(lead, context) {
   const count = Number.parseInt(lead.enrichment?.employeeCount, 10);
-  if (!Number.isFinite(count) || count < context.minEmployees) return false;
-  if (context.maxEmployees && count > context.maxEmployees) return false;
-  return true;
+  if (Number.isFinite(count)) {
+    if (count < context.minEmployees) return false;
+    if (context.maxEmployees && count > context.maxEmployees) return false;
+    return true;
+  }
+  return scaleProxyMatchesMode(lead.enrichment?.organizationScaleProxy, context.marketMode);
+}
+
+function scaleProxyMatchesMode(proxy, marketMode) {
+  if (!proxy) return false;
+  if (marketMode === "established") {
+    return ["mid_market_proxy", "large_opportunity_proxy", "enterprise_watch_proxy"].includes(proxy);
+  }
+  if (marketMode === "mid-market") return proxy === "mid_market_proxy";
+  if (marketMode === "large-opportunities") return proxy === "large_opportunity_proxy";
+  if (marketMode === "enterprise-watch") return proxy === "enterprise_watch_proxy";
+  return false;
 }
 
 function mergeEnrichmentMaps(...maps) {
   const merged = new Map();
   for (const map of maps) {
     for (const [id, value] of map) merged.set(id, value);
+  }
+  return merged;
+}
+
+function mergeFallbackEmployeeCounts(primaryMap, fallbackMap) {
+  if (!fallbackMap?.size) return primaryMap;
+  const merged = new Map(primaryMap);
+  for (const [id, fallback] of fallbackMap) {
+    if (!fallback?.employeeCount) continue;
+    const current = merged.get(id) || {};
+    if (current.employeeCount || current.currentEmployeeCount) continue;
+    merged.set(id, {
+      ...current,
+      employeeCount: fallback.employeeCount,
+      employeeCountSourceName: fallback.employeeCountSourceName,
+      employeeCountSourceUrl: fallback.employeeCountSourceUrl,
+      employeeCountEvidence: fallback.employeeCountEvidence,
+      sourceName: current.sourceName || fallback.sourceName,
+      sourceUrl: current.sourceUrl || fallback.sourceUrl,
+      updatedAt: current.updatedAt || fallback.updatedAt,
+      confidence: current.confidence && current.confidence !== "missing" ? current.confidence : fallback.confidence,
+      verificationEvidence: [
+        ...(current.verificationEvidence || []),
+        ...(fallback.verificationEvidence || [])
+      ].slice(0, 8),
+      verifiedSources: [
+        ...(current.verifiedSources || []),
+        ...(fallback.verifiedSources || [])
+      ].slice(0, 8)
+    });
+  }
+  return merged;
+}
+
+function listedMarketFromCachedEnrichment(enrichmentMap) {
+  const map = new Map();
+  for (const [id, enrichment] of enrichmentMap) {
+    const signals = Array.isArray(enrichment?.listedMarketSignals) ? enrichment.listedMarketSignals : [];
+    if (signals.length) map.set(id, signals);
+  }
+  const signals = [...map.values()].flat();
+  return {
+    map,
+    enrichmentMap: new Map(),
+    stats: {
+      checked: enrichmentMap.size,
+      matched: map.size,
+      historyFetched: 0,
+      yahooProfilesFetched: 0,
+      yahooEmployeeCounts: [...enrichmentMap.values()].filter((item) => {
+        return /Yahoo Finance quoteSummary/i.test(item?.employeeCountSourceName || "");
+      }).length,
+      signals: signals.length,
+      sustainedSignals: signals.filter((signal) => signal.type === "listed_market_sustained_growth").length,
+      jumpSignals: signals.filter((signal) => signal.type === "listed_market_jump").length
+    },
+    errors: [],
+    status: "cached"
+  };
+}
+
+function attachListedMarketSignals(enrichmentMap, signalMap) {
+  if (!signalMap?.size) return enrichmentMap;
+  const merged = new Map(enrichmentMap);
+  for (const [id, signals] of signalMap) {
+    if (!signals?.length) continue;
+    const current = merged.get(id) || {};
+    merged.set(id, { ...current, listedMarketSignals: signals });
   }
   return merged;
 }
@@ -236,6 +351,7 @@ function disabledCacheStats(checked) {
     skippedMissing: 0,
     skippedStale: 0,
     cacheOnly: false,
+    freshForEndpointSkip: false,
     updatedToday: false,
     ttlDays: 0
   };
@@ -243,11 +359,15 @@ function disabledCacheStats(checked) {
 
 function cachePipelineDetail(context, cached, cacheWrite, cacheStatus) {
   if (!context.useCache) return "Company enrichment cache disabled for this run.";
+  if (context.refreshCache) {
+    return `${cached.stats.checked} companies forced through live refresh; ${cacheWrite.saved} company records saved/refreshed.`;
+  }
   if (cached.stats.cacheOnly) {
     const skipped = (cached.stats.skippedMissing || 0) + (cached.stats.skippedStale || 0);
+    const maxHours = cacheStatus.cacheMaxEndpointSkipHours || 12;
     return [
-      `Daily cache is fresh for ${cacheStatus.today}; ${cached.stats.hits} company IDs served from cache.`,
-      skipped ? `${skipped} companies were not enriched now because they are missing/stale in cache.` : "No internet enrichment was needed.",
+      `Cache is younger than ${maxHours}h; ${cached.stats.hits} company IDs served from SQLite.`,
+      skipped ? `${skipped} companies were not enriched now because they are missing/stale in cache.` : "No live enrichment endpoints were needed.",
       "Turn off Use cached enrichment to force a live refresh."
     ].join(" ");
   }
@@ -258,6 +378,7 @@ function summarizeEnrichmentMap(enrichmentMap) {
   const values = [...enrichmentMap.values()];
   return {
     officialEmployeeCounts: values.filter((item) => item?.employeeCount && /PRH XBRL/i.test(item.employeeCountSourceName || "")).length,
+    financialScaleProxies: values.filter((item) => item?.organizationScaleProxy).length,
     currentEmployeeCounts: values.filter((item) => item?.currentEmployeeCount).length,
     websitesFound: values.filter((item) => item?.companyWebsite).length,
     publicWebContacts: values.reduce((sum, item) => {
@@ -286,12 +407,32 @@ export async function runRadar(query) {
     : await filterLeadsWithUnseenSignals(baseLeads);
   let preRankedCompanies = companiesFromLeads(official.companies, candidateFilter.leads);
   let listedMarket = disabledListedMarket();
+  let listedEmployeeFallback = disabledListedEmployeeFallback();
   let enrichmentCandidates = preRankedCompanies.slice(0, context.enrichmentLimit);
+  let listedCacheCandidates = [];
   let leadCompanies = preRankedCompanies;
+  const cacheStatus = context.useCache
+    ? await getCompanyCacheStatus()
+    : {
+      updatedAt: "",
+      updatedToday: false,
+      freshForEndpointSkip: false,
+      cacheMaxEndpointSkipHours: 12,
+      today: "",
+      totalCompaniesCached: 0
+    };
+  const useFreshCacheOnly = context.useCache && !context.refreshCache && cacheStatus.freshForEndpointSkip;
+  const readCache = context.useCache && !context.refreshCache;
 
   if (context.marketMode === "listed-growth") {
     const listedCandidates = companiesFromLeads(official.companies, baseLeads);
-    listedMarket = await analyzeListedCompanyMomentum(listedCandidates, { limit: context.listedLimit });
+    listedCacheCandidates = listedCandidates;
+    if (readCache && useFreshCacheOnly) {
+      const cachedListedMarket = await getCachedEnrichmentMap(listedCandidates, { cacheOnly: true });
+      listedMarket = listedMarketFromCachedEnrichment(cachedListedMarket.map);
+    } else {
+      listedMarket = await analyzeListedCompanyMomentum(listedCandidates, { limit: context.listedLimit });
+    }
     const listedLeads = listedCandidates
       .map((company) => buildLead(company, {
         range: context.range,
@@ -308,28 +449,49 @@ export async function runRadar(query) {
     leadCompanies = enrichmentCandidates;
   }
 
-  const cacheStatus = context.useCache
-    ? await getCompanyCacheStatus()
-    : { updatedAt: "", updatedToday: false, today: "", totalCompaniesCached: 0 };
-  const useDailyCacheOnly = context.useCache && cacheStatus.updatedToday;
   const cached = context.useCache
-    ? await getCachedEnrichmentMap(enrichmentCandidates, { cacheOnly: useDailyCacheOnly })
+    ? (readCache
+      ? await getCachedEnrichmentMap(enrichmentCandidates, { cacheOnly: useFreshCacheOnly })
+      : { map: new Map(), missingCompanies: enrichmentCandidates, skippedCompanies: [], stats: { ...disabledCacheStats(enrichmentCandidates.length), status: "refresh" } })
     : { map: new Map(), missingCompanies: enrichmentCandidates, skippedCompanies: [], stats: disabledCacheStats(enrichmentCandidates.length) };
+
+  if (isSizeSegmentMode(context.marketMode) && (!readCache || !useFreshCacheOnly) && cached.missingCompanies.length) {
+    listedEmployeeFallback = await findListedCompanyEmployeeFallbacks(cached.missingCompanies, {
+      limit: context.enrichmentLimit
+    });
+  }
 
   const freshEnrichment = cached.missingCompanies.length
     ? await enrichCompanies(cached.missingCompanies, {
-    publicWeb: context.publicWeb,
-    websiteDiscovery: context.websiteDiscovery,
-    websiteDiscoveryLimit: context.websiteDiscoveryLimit,
-    virrePeople: context.virrePeople,
-    virreLimit: context.virreLimit,
-    currentEmployeeSearch: context.currentEmployeeSearch,
-    currentEmployeeSearchLimit: context.currentEmployeeSearchLimit
-      })
+      publicWeb: context.publicWeb,
+      websiteDiscovery: context.websiteDiscovery,
+      websiteDiscoveryLimit: context.websiteDiscoveryLimit,
+      virrePeople: context.virrePeople,
+      virreLimit: context.virreLimit,
+      currentEmployeeSearch: context.currentEmployeeSearch,
+      currentEmployeeSearchLimit: context.currentEmployeeSearchLimit,
+      employeeFallbackMap: listedEmployeeFallback.enrichmentMap
+    })
     : { map: new Map(), stats: emptyEnrichmentStats() };
 
-  const enrichmentMap = mergeEnrichmentMaps(cached.map, freshEnrichment.map);
-  const cacheWrite = await saveEnrichmentCache(cached.missingCompanies, freshEnrichment.map, {
+  const fallbackEnrichmentMap = mergeEnrichmentMaps(listedMarket.enrichmentMap, listedEmployeeFallback.enrichmentMap);
+  const liveWriteBaseMap = attachListedMarketSignals(
+    mergeEnrichmentMaps(freshEnrichment.map, fallbackEnrichmentMap),
+    listedMarket.map
+  );
+  const enrichmentMap = mergeFallbackEmployeeCounts(
+    attachListedMarketSignals(mergeEnrichmentMaps(cached.map, freshEnrichment.map), listedMarket.map),
+    fallbackEnrichmentMap
+  );
+  const cacheWriteMap = mergeFallbackEmployeeCounts(
+    liveWriteBaseMap,
+    fallbackEnrichmentMap
+  );
+  const cacheWriteCompanies = uniqueCompaniesByBusinessId([
+    ...cached.missingCompanies,
+    ...listedCacheCandidates
+  ]);
+  const cacheWrite = await saveEnrichmentCache(cacheWriteCompanies, cacheWriteMap, {
     marketMode: context.marketMode,
     region: context.region,
     source: context.recordDisplay ? "radar" : "prefetch"
@@ -356,12 +518,12 @@ export async function runRadar(query) {
     .sort((a, b) => b.score - a.score);
 
   const growthDetected = await applyGrowthDetection(rawLeads);
-  const claudeVerified = await verifyLeadsWithClaude(growthDetected.leads, context);
-  const remembered = await applyMemory(claudeVerified.leads, {
+  const remembered = await applyMemory(growthDetected.leads, {
     visibility: context.visibility,
     recordDisplay: context.recordDisplay
   });
-  const visibleLeads = remembered.visibleLeads;
+  const claudeVerified = await verifyLeadsWithClaude(remembered.visibleLeads, context);
+  const visibleLeads = claudeVerified.leads;
 
   return {
     context,
@@ -373,6 +535,7 @@ export async function runRadar(query) {
       rawLeads: rawLeads.length,
       ...candidateFilter.stats,
       officialEmployeeCounts: Math.max(enrichment.stats.financials.employeeCountsFound, enrichmentTotals.officialEmployeeCounts),
+      financialScaleProxies: Math.max(enrichment.stats.financials.scaleProxiesFound || 0, enrichmentTotals.financialScaleProxies),
       currentEmployeeCounts: Math.max(enrichment.stats.currentEmployeeSearch?.found || 0, enrichmentTotals.currentEmployeeCounts),
       currentEmployeeSearchChecked: enrichment.stats.currentEmployeeSearch?.checked || 0,
       currentEmployeeSearchUrlsChecked: enrichment.stats.currentEmployeeSearch?.urlsChecked || 0,
@@ -383,6 +546,8 @@ export async function runRadar(query) {
       cacheSkippedMissing: cached.stats.skippedMissing || 0,
       cacheSkippedStale: cached.stats.skippedStale || 0,
       cacheUpdatedToday: cacheStatus.updatedToday,
+      cacheFreshForEndpointSkip: cacheStatus.freshForEndpointSkip,
+      cacheAgeMs: cacheStatus.cacheAgeMs ?? null,
       cacheSaved: cacheWrite.saved,
       totalCompaniesCached: cacheWrite.totalCompaniesCached || cacheStatus.totalCompaniesCached || 0,
       websitesFound: Math.max(enrichment.stats.publicWeb.websitesFound, enrichmentTotals.websitesFound),
@@ -396,6 +561,9 @@ export async function runRadar(query) {
       listedCompaniesChecked: listedMarket.stats.checked,
       listedCompaniesMatched: listedMarket.stats.matched,
       listedPriceHistories: listedMarket.stats.historyFetched,
+      listedYahooProfiles: (listedMarket.stats.yahooProfilesFetched || 0) + (listedEmployeeFallback.stats.yahooProfilesFetched || 0),
+      listedYahooEmployeeCounts: (listedMarket.stats.yahooEmployeeCounts || 0) + (listedEmployeeFallback.stats.yahooEmployeeCounts || 0),
+      listedYahooEmployeeFallbacksChecked: listedEmployeeFallback.stats.checked || 0,
       listedGrowthSignals: listedMarket.stats.signals,
       listedSustainedSignals: listedMarket.stats.sustainedSignals,
       listedJumpSignals: listedMarket.stats.jumpSignals,
@@ -408,18 +576,19 @@ export async function runRadar(query) {
       WEBSITE_DISCOVERY_SOURCE,
       ...(context.currentEmployeeSearch ? [CURRENT_EMPLOYEE_SEARCH_SOURCE] : []),
       ...VIRRE_SOURCES,
-      ...(context.publicListed ? LISTED_MARKET_SOURCES : [])
+      ...(context.publicListed || isSizeSegmentMode(context.marketMode) ? LISTED_MARKET_SOURCES : [])
     ],
     pipeline: [
-      { agent: "source-agent", status: "ok", detail: `${context.marketModeLabel}: ${official.totals.companiesReturned} official PRH records returned. ${official.totals.sourceProfile}` },
-      { agent: "history-prefilter", status: context.visibility !== "new-signals" || isSizeSegmentMode(context.marketMode) ? "disabled" : "ok", detail: context.visibility === "include-seen" ? "Include already shown is enabled; no pre-filtering before enrichment." : isSizeSegmentMode(context.marketMode) ? "Size-segment mode needs employee counts before history filtering, so enrichment/cache runs on the pre-ranked candidate pool." : context.visibility === "never-displayed" ? "Never-displayed mode filters after company display memory is read." : `${candidateFilter.stats.skippedKnownLeadsBeforeEnrichment} already-known leads skipped before Virre, website discovery and market enrichment.` },
+      { agent: "source-agent", status: "ok", detail: `${context.marketModeLabel}: ${official.totals.companiesReturned} official PRH records returned. ${official.totals.sourceProfile}${official.sourceCache?.status === "hit" ? " Source snapshot served from SQLite cache." : ""}` },
+      { agent: "history-prefilter", status: context.visibility !== "new-signals" || isSizeSegmentMode(context.marketMode) ? "disabled" : "ok", detail: context.visibility === "include-seen" ? "Include already shown is enabled; no pre-filtering before enrichment." : isSizeSegmentMode(context.marketMode) ? "Size-segment mode needs employee count or financial scale evidence before history filtering, so enrichment/cache runs on the pre-ranked candidate pool." : context.visibility === "never-displayed" ? "Never-displayed mode filters after company display memory is read." : `${candidateFilter.stats.skippedKnownLeadsBeforeEnrichment} already-known leads skipped before Virre, website discovery and market enrichment.` },
       { agent: "cache-agent", status: context.useCache ? "ok" : "disabled", detail: cachePipelineDetail(context, cached, cacheWrite, cacheStatus) },
-      { agent: "financials-agent", status: enrichment.stats.financials.employeeCountsFound ? "ok" : "partial", detail: `${enrichment.stats.financials.employeeCountsFound} official employee counts found in PRH/XBRL financial statements.` },
+      { agent: "financials-agent", status: enrichment.stats.financials.employeeCountsFound || enrichment.stats.financials.scaleProxiesFound ? "ok" : "partial", detail: `${enrichment.stats.financials.employeeCountsFound} official employee counts and ${enrichment.stats.financials.scaleProxiesFound || 0} financial scale proxies found in PRH/XBRL financial statements.` },
       { agent: "current-employee-search-agent", status: context.currentEmployeeSearch ? enrichment.stats.currentEmployeeSearch.status : "disabled", detail: context.currentEmployeeSearch ? `${enrichment.stats.currentEmployeeSearch.found} current employee counts found from ${enrichment.stats.currentEmployeeSearch.urlsChecked} fetched company-owned search-result pages/PDFs.` : "Enable Agent employee search in the UI to run deep current-employee web search." },
       { agent: "virre-agent", status: context.virrePeople ? enrichment.stats.virre.status : "disabled", detail: context.virrePeople ? `${enrichment.stats.virre.peopleFound} official Virre board/CEO people from ${enrichment.stats.virre.extractsDownloaded} Trade Register extract PDFs.` : "Virre Trade Register extract scan disabled." },
       { agent: "website-discovery-agent", status: context.websiteDiscovery ? "ok" : "disabled", detail: context.websiteDiscovery ? `${enrichment.stats.websiteDiscovery.verified} websites verified from ${enrichment.stats.websiteDiscovery.candidatesChecked} guessed candidates.` : "Website discovery disabled." },
       { agent: "enrichment-agent", status: context.publicWeb ? "ok" : "disabled", detail: context.publicWeb ? "Verified company-owned websites scanned for contacts, people and employee-count evidence." : "Public website scan disabled." },
-      { agent: "listed-market-agent", status: context.publicListed ? listedMarket.status : "disabled", detail: context.publicListed ? `${listedMarket.stats.matched} listed companies matched to Finnish shares; ${listedMarket.stats.signals} sourced price-momentum signals selected for this mode.` : "Listed-market scan disabled unless the Listed rapid growth mode is selected." },
+      { agent: "listed-market-agent", status: context.publicListed ? listedMarket.status : "disabled", detail: context.publicListed ? `${listedMarket.stats.matched} listed companies matched to Finnish shares; ${listedMarket.stats.signals} sourced price-momentum signals selected for this mode; ${listedMarket.stats.yahooEmployeeCounts || 0} Yahoo Finance employee-count fallbacks found.` : "Listed-market scan disabled unless the Listed rapid growth mode is selected." },
+      { agent: "listed-employee-fallback-agent", status: listedEmployeeFallback.status, detail: isSizeSegmentMode(context.marketMode) ? (useFreshCacheOnly ? "Fresh SQLite cache is active, so Nasdaq/Yahoo employee fallback endpoints were skipped." : `${listedEmployeeFallback.stats.checked} Oyj candidates checked against Nasdaq/Yahoo before slower enrichment; ${listedEmployeeFallback.stats.yahooEmployeeCounts} Yahoo Finance employee-count fallbacks found.`) : "Yahoo employee fallback for size modes runs only for medium/large/enterprise scans." },
       { agent: "growth-agent", status: "ok", detail: `${growthDetected.stats.jumpSignals} jump signals, ${growthDetected.stats.sustainedSignals} sustained-growth signals, ${growthDetected.stats.currentMomentumSignals} current-momentum signals.` },
       { agent: "claude-verifier", status: claudeVerified.meta.status, detail: claudeVerified.meta.message || (claudeVerified.meta.reviewedLeads ? `${claudeVerified.meta.reviewedLeads} top leads checked by Claude.` : "Claude verification not run.") },
       { agent: "memory-agent", status: "ok", detail: `${remembered.stats.newSignals} new signals, ${remembered.stats.knownSignals} already seen.` }
@@ -430,7 +599,8 @@ export async function runRadar(query) {
       ...official.errors,
       ...((enrichment.stats.virre.errors ?? []).map((message) => ({ source: "PRH Virre", city: "extract", message }))),
       ...((enrichment.stats.currentEmployeeSearch?.errors ?? []).map((message) => ({ source: "Current employee search", city: "web", message }))),
-      ...(listedMarket.errors ?? [])
+      ...(listedMarket.errors ?? []),
+      ...(listedEmployeeFallback.errors ?? [])
     ],
     newsletter: buildNewsletter(visibleLeads, context, remembered.stats),
     leads: visibleLeads.slice(0, 80)

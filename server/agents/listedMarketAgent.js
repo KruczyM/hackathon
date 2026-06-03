@@ -1,7 +1,9 @@
 import { stableHash } from "../lib/hash.js";
+import { describeFetchError } from "../lib/fetchErrors.js";
 
 const NFIN_BASE = "https://api.nfin.dev/v1";
 const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
+const YAHOO_QUOTE_SUMMARY_BASE = "https://query1.finance.yahoo.com/v10/finance/quoteSummary";
 const SOURCE_NAME = "Yahoo Finance chart API + nfin.dev Nasdaq Nordic API";
 const USER_AGENT = "NovapolisLeadRadar/1.0";
 const MIN_MATCH_SCORE = 0.82;
@@ -35,6 +37,11 @@ export const LISTED_MARKET_SOURCES = [
     name: "Yahoo Finance chart API",
     url: "https://query1.finance.yahoo.com/v8/finance/chart/NOKIA.HE?range=3mo&interval=1d",
     note: "Free public chart endpoint used for daily Helsinki share-price history when a .HE ticker can be derived automatically."
+  },
+  {
+    name: "Yahoo Finance quoteSummary assetProfile",
+    url: "https://query1.finance.yahoo.com/v10/finance/quoteSummary/NOKIA.HE?modules=assetProfile",
+    note: "Free public profile endpoint used as a non-official fallback for full-time employee counts of listed companies when official/company-owned employee evidence is missing."
   }
 ];
 
@@ -58,6 +65,8 @@ async function fetchJson(url, timeoutMs = 15000) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return await response.json();
+  } catch (error) {
+    throw new Error(describeFetchError(error, url));
   } finally {
     timeout.clear();
   }
@@ -210,6 +219,10 @@ function yahooChartUrl(yahooSymbol) {
   return `${YAHOO_CHART_BASE}/${encodeURIComponent(yahooSymbol)}?range=3mo&interval=1d`;
 }
 
+function yahooProfileUrl(yahooSymbol) {
+  return `${YAHOO_QUOTE_SUMMARY_BASE}/${encodeURIComponent(yahooSymbol)}?modules=assetProfile`;
+}
+
 export function extractYahooPoints(json) {
   const result = json?.chart?.result?.[0];
   const timestamps = result?.timestamp ?? [];
@@ -237,6 +250,44 @@ async function fetchYahooHistory(instrument) {
       ? new Date(json.chart.result[0].meta.regularMarketTime * 1000).toISOString()
       : "",
     points
+  };
+}
+
+export function extractYahooEmployeeCount(json) {
+  const value = json?.quoteSummary?.result?.[0]?.assetProfile?.fullTimeEmployees;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1_000_000) return null;
+  return parsed;
+}
+
+async function fetchYahooEmployeeProfile(instrument) {
+  const yahooSymbol = toYahooSymbol(instrument.symbol);
+  if (!yahooSymbol) return null;
+  const url = yahooProfileUrl(yahooSymbol);
+  const json = await fetchJson(url, 12000);
+  const employeeCount = extractYahooEmployeeCount(json);
+  if (!employeeCount) return null;
+  return {
+    yahooSymbol,
+    employeeCount,
+    url,
+    asOf: new Date().toISOString()
+  };
+}
+
+function yahooEmployeeEnrichment(company, profile) {
+  if (!profile?.employeeCount) return null;
+  return {
+    employeeCount: String(profile.employeeCount),
+    employeeCountSourceName: "Yahoo Finance quoteSummary assetProfile",
+    employeeCountSourceUrl: profile.url,
+    employeeCountEvidence: `${profile.yahooSymbol} assetProfile.fullTimeEmployees=${profile.employeeCount}. Public market profile fallback; not official PRH data.`,
+    sourceName: "Yahoo Finance quoteSummary assetProfile",
+    sourceUrl: profile.url,
+    updatedAt: profile.asOf,
+    confidence: "public-market-profile",
+    verifiedSources: [{ url: profile.url, name: "Yahoo Finance quoteSummary assetProfile" }],
+    verificationEvidence: [`Yahoo Finance listed-company profile returned fullTimeEmployees=${profile.employeeCount} for ${currentName(company)}.`]
   };
 }
 
@@ -380,6 +431,7 @@ export async function analyzeListedCompanyMomentum(companies, options = {}) {
   const limit = Number.parseInt(options.limit, 10) || 250;
   const targets = companies.slice(0, limit);
   const signalsMap = new Map();
+  const enrichmentMap = new Map();
   const errors = [];
   const stats = {
     checked: targets.length,
@@ -387,6 +439,8 @@ export async function analyzeListedCompanyMomentum(companies, options = {}) {
     matched: 0,
     searchFallbacks: 0,
     historyFetched: 0,
+    yahooProfilesFetched: 0,
+    yahooEmployeeCounts: 0,
     signals: 0,
     sustainedSignals: 0,
     jumpSignals: 0
@@ -398,9 +452,10 @@ export async function analyzeListedCompanyMomentum(companies, options = {}) {
     shareRows = screener.rows;
     stats.instrumentsLoaded = shareRows.length;
   } catch (error) {
-    return {
-      map: signalsMap,
-      stats,
+      return {
+        map: signalsMap,
+        enrichmentMap,
+        stats,
       errors: [{ source: "nfin.dev Nordic screener", city: "market", message: error.message }],
       status: "error"
     };
@@ -424,10 +479,22 @@ export async function analyzeListedCompanyMomentum(companies, options = {}) {
     stats.matched += 1;
 
     try {
-      const [summary, history] = await Promise.all([
+      const [summary, history, employeeProfile] = await Promise.all([
         fetchNfinSummary(instrument),
-        fetchYahooHistory(instrument)
+        fetchYahooHistory(instrument),
+        fetchYahooEmployeeProfile(instrument).catch((error) => {
+          errors.push({ source: "Yahoo Finance quoteSummary assetProfile", city: name, message: error.message });
+          return null;
+        })
       ]);
+      if (employeeProfile) {
+        stats.yahooProfilesFetched += 1;
+        const enrichment = yahooEmployeeEnrichment(company, employeeProfile);
+        if (enrichment) {
+          enrichmentMap.set(businessId(company), enrichment);
+          stats.yahooEmployeeCounts += 1;
+        }
+      }
       if (!history) continue;
 
       stats.historyFetched += 1;
@@ -446,8 +513,77 @@ export async function analyzeListedCompanyMomentum(companies, options = {}) {
 
   return {
     map: signalsMap,
+    enrichmentMap,
     stats,
     errors,
     status: errors.length && stats.signals === 0 ? "partial" : "ok"
+  };
+}
+
+export async function findListedCompanyEmployeeFallbacks(companies, options = {}) {
+  const limit = Number.parseInt(options.limit, 10) || companies.length;
+  const targets = companies.slice(0, limit).filter((company) => looksLikePublicLimitedCompany(currentName(company)));
+  const enrichmentMap = new Map();
+  const errors = [];
+  const stats = {
+    checked: targets.length,
+    instrumentsLoaded: 0,
+    matched: 0,
+    searchFallbacks: 0,
+    yahooProfilesFetched: 0,
+    yahooEmployeeCounts: 0
+  };
+
+  if (!targets.length) {
+    return { enrichmentMap, stats, errors, status: "skipped" };
+  }
+
+  let shareRows = [];
+  try {
+    const screener = await fetchNordicShareRows();
+    shareRows = screener.rows;
+    stats.instrumentsLoaded = shareRows.length;
+  } catch (error) {
+    return {
+      enrichmentMap,
+      stats,
+      errors: [{ source: "nfin.dev Nordic screener", city: "market", message: error.message }],
+      status: "error"
+    };
+  }
+
+  for (const company of targets) {
+    const name = currentName(company);
+    let instrument = selectBestInstrument(name, shareRows);
+    if (!instrument && stats.searchFallbacks < 20) {
+      try {
+        const search = await searchNordicShares(name);
+        stats.searchFallbacks += 1;
+        instrument = selectBestInstrument(name, search.rows);
+      } catch (error) {
+        errors.push({ source: "nfin.dev Nordic search", city: name, message: error.message });
+      }
+    }
+    if (!instrument) continue;
+    stats.matched += 1;
+
+    try {
+      const profile = await fetchYahooEmployeeProfile(instrument);
+      if (!profile) continue;
+      stats.yahooProfilesFetched += 1;
+      const enrichment = yahooEmployeeEnrichment(company, profile);
+      if (!enrichment) continue;
+      enrichmentMap.set(businessId(company), enrichment);
+      stats.yahooEmployeeCounts += 1;
+    } catch (error) {
+      errors.push({ source: "Yahoo Finance quoteSummary assetProfile", city: name, message: error.message });
+    }
+  }
+
+  return {
+    enrichmentMap,
+    stats,
+    errors,
+    status: errors.length && stats.yahooEmployeeCounts === 0 ? "partial" : "ok"
   };
 }
