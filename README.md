@@ -19,10 +19,7 @@ The app runs an automated agent pipeline:
 The UI exposes one search mode at a time:
 
 - `New / changed`: recent company registrations, official PRH updates and registered notices.
-- `Mid-market`: existing `Oy`/`Oyj` companies with sourced `50-249` employee counts or official financial scale proxy.
-- `Large opportunities`: existing companies with sourced `250-999` employee counts or official financial scale proxy.
-- `Enterprise watch`: existing companies with sourced `1000+` employee counts or enterprise-scale financial proxy, kept separate from core hot leads.
-- `Listed growth`: region-registered `Oyj` companies matched to Nasdaq Helsinki, then Yahoo Finance daily prices are checked for sustained growth or a large jump.
+- `Largest stock jumps`: region-registered `Oyj` companies matched to Nasdaq Helsinki, then Yahoo Finance daily prices are checked for the strongest listed-market momentum.
 
 ## Run
 
@@ -52,7 +49,7 @@ Technical architecture, database schema and API notes are documented in [`docs/T
 - PRH/XBRL financial statement employee count: on for scanned leads.
 - Current employee web search: off by default; enable `Agent employee search` when you want deeper employee-count discovery from company-owned pages/PDFs.
 - Virre Trade Register extract scan: on for the top 12 scanned leads.
-- Listed-market scan: on only when `Listed growth` mode is selected, no ticker entry required.
+- Listed-market scan: on only when `Largest stock jumps` mode is selected, no ticker entry required.
 - Claude verification: off until `ANTHROPIC_API_KEY` is set and the UI toggle is enabled.
 - Company enrichment cache: on by default.
 - Background Finland prefetch: starts after backend startup unless `PREFETCH_ON_START=false`.
@@ -69,7 +66,7 @@ PRH/YTJ does not return a raw employee count in the normal company response. The
 
 The financials agent then searches the XML facts for employee/personnel count facts. When found, this is shown as `PRH XBRL financial statement` and takes priority over website employee estimates.
 
-If employee count is missing, the same official statement is checked for financial scale facts: net sales/revenue, balance sheet total/total assets, or personnel expenses. These facts can qualify a company for mid-market, large-opportunity or enterprise-watch modes as a `financial scale proxy`. This is not an employee-count claim and must not be used to say how many people the company employs.
+If employee count is missing, the same official statement is checked for financial scale facts: net sales/revenue, balance sheet total/total assets, or personnel expenses. These facts can still be shown as organization-scale context when present. This is not an employee-count claim and must not be used to say how many people the company employs.
 
 ## Current Employee Web Search
 
@@ -189,15 +186,9 @@ In medium/large/enterprise scans, `Oyj` candidates are checked against Nasdaq/Ya
 
 When the SQLite cache is younger than 12 hours, listed-growth mode rebuilds its listed signals from cached `listedMarketSignals` instead of calling nfin/Yahoo. A company appears in cache-only listed-growth only after a previous live listed-growth run or prefetch has saved that signal.
 
-## Size Segment Modes
+## Organization Scale Evidence
 
-Size segment modes do not use the recent-registration date filter. They pull existing `Oy`/`Oyj` companies from the selected area, run enrichment/cache on the pre-ranked candidate pool, and keep companies when sourced employee evidence or official financial scale proxy matches the selected segment:
-
-- `Mid-market`: `50-249` employees or mid-market financial scale proxy.
-- `Large opportunities`: `250-999` employees or large financial scale proxy.
-- `Enterprise watch`: `1000+` employees or enterprise-watch financial scale proxy.
-
-The employee-count or scale-proxy source URL remains visible in the final lead card. Financial proxy labels are deliberately shown as proxy evidence, not as headcount.
+The employee-count or scale-proxy source URL remains visible in the final lead card when evidence exists. Financial proxy labels are deliberately shown as proxy evidence, not as headcount.
 
 ## Windows Autostart
 

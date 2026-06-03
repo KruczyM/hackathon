@@ -11,7 +11,7 @@ import { analyzeListedCompanyMomentum, findListedCompanyEmployeeFallbacks, LISTE
 import { VIRRE_SOURCES } from "./virreAgent.js";
 import { WEBSITE_DISCOVERY_SOURCE } from "./websiteDiscoveryAgent.js";
 import { CURRENT_EMPLOYEE_SEARCH_SOURCE } from "./currentEmployeeSearchAgent.js";
-import { getCachedEnrichmentMap, getCompanyCacheStatus, saveEnrichmentCache } from "./companyCacheAgent.js";
+import { ENDPOINT_SKIP_CACHE_MS, getCachedEnrichmentMap, getCompanyCacheStatus, saveEnrichmentCache } from "./companyCacheAgent.js";
 
 const SEARCH_MODES = {
   "new-changes": {
@@ -421,15 +421,16 @@ export async function runRadar(query) {
       today: "",
       totalCompaniesCached: 0
     };
-  const useFreshCacheOnly = context.useCache && !context.refreshCache && cacheStatus.freshForEndpointSkip;
   const readCache = context.useCache && !context.refreshCache;
 
   if (context.marketMode === "listed-growth") {
     const listedCandidates = companiesFromLeads(official.companies, baseLeads);
     listedCacheCandidates = listedCandidates;
-    if (readCache && useFreshCacheOnly) {
-      const cachedListedMarket = await getCachedEnrichmentMap(listedCandidates, { cacheOnly: true });
-      listedMarket = listedMarketFromCachedEnrichment(cachedListedMarket.map);
+    if (readCache) {
+      const cachedListedMarket = await getCachedEnrichmentMap(listedCandidates, { ttlMs: ENDPOINT_SKIP_CACHE_MS });
+      listedMarket = cachedListedMarket.missingCompanies.length
+        ? await analyzeListedCompanyMomentum(listedCandidates, { limit: context.listedLimit })
+        : listedMarketFromCachedEnrichment(cachedListedMarket.map);
     } else {
       listedMarket = await analyzeListedCompanyMomentum(listedCandidates, { limit: context.listedLimit });
     }
@@ -451,11 +452,11 @@ export async function runRadar(query) {
 
   const cached = context.useCache
     ? (readCache
-      ? await getCachedEnrichmentMap(enrichmentCandidates, { cacheOnly: useFreshCacheOnly })
+      ? await getCachedEnrichmentMap(enrichmentCandidates, { ttlMs: ENDPOINT_SKIP_CACHE_MS })
       : { map: new Map(), missingCompanies: enrichmentCandidates, skippedCompanies: [], stats: { ...disabledCacheStats(enrichmentCandidates.length), status: "refresh" } })
     : { map: new Map(), missingCompanies: enrichmentCandidates, skippedCompanies: [], stats: disabledCacheStats(enrichmentCandidates.length) };
 
-  if (isSizeSegmentMode(context.marketMode) && (!readCache || !useFreshCacheOnly) && cached.missingCompanies.length) {
+  if (isSizeSegmentMode(context.marketMode) && cached.missingCompanies.length) {
     listedEmployeeFallback = await findListedCompanyEmployeeFallbacks(cached.missingCompanies, {
       limit: context.enrichmentLimit
     });
@@ -588,7 +589,7 @@ export async function runRadar(query) {
       { agent: "website-discovery-agent", status: context.websiteDiscovery ? "ok" : "disabled", detail: context.websiteDiscovery ? `${enrichment.stats.websiteDiscovery.verified} websites verified from ${enrichment.stats.websiteDiscovery.candidatesChecked} guessed candidates.` : "Website discovery disabled." },
       { agent: "enrichment-agent", status: context.publicWeb ? "ok" : "disabled", detail: context.publicWeb ? "Verified company-owned websites scanned for contacts, people and employee-count evidence." : "Public website scan disabled." },
       { agent: "listed-market-agent", status: context.publicListed ? listedMarket.status : "disabled", detail: context.publicListed ? `${listedMarket.stats.matched} listed companies matched to Finnish shares; ${listedMarket.stats.signals} sourced price-momentum signals selected for this mode; ${listedMarket.stats.yahooEmployeeCounts || 0} Yahoo Finance employee-count fallbacks found.` : "Listed-market scan disabled unless the Listed rapid growth mode is selected." },
-      { agent: "listed-employee-fallback-agent", status: listedEmployeeFallback.status, detail: isSizeSegmentMode(context.marketMode) ? (useFreshCacheOnly ? "Fresh SQLite cache is active, so Nasdaq/Yahoo employee fallback endpoints were skipped." : `${listedEmployeeFallback.stats.checked} Oyj candidates checked against Nasdaq/Yahoo before slower enrichment; ${listedEmployeeFallback.stats.yahooEmployeeCounts} Yahoo Finance employee-count fallbacks found.`) : "Yahoo employee fallback for size modes runs only for medium/large/enterprise scans." },
+      { agent: "listed-employee-fallback-agent", status: listedEmployeeFallback.status, detail: isSizeSegmentMode(context.marketMode) ? (cached.missingCompanies.length ? `${listedEmployeeFallback.stats.checked} Oyj candidates checked against Nasdaq/Yahoo before slower enrichment; ${listedEmployeeFallback.stats.yahooEmployeeCounts} Yahoo Finance employee-count fallbacks found.` : "Fresh SQLite enrichment cache covered the selected candidates, so Nasdaq/Yahoo employee fallback endpoints were not needed.") : "Yahoo employee fallback for size modes runs only for medium/large/enterprise scans." },
       { agent: "growth-agent", status: "ok", detail: `${growthDetected.stats.jumpSignals} jump signals, ${growthDetected.stats.sustainedSignals} sustained-growth signals, ${growthDetected.stats.currentMomentumSignals} current-momentum signals.` },
       { agent: "claude-verifier", status: claudeVerified.meta.status, detail: claudeVerified.meta.message || (claudeVerified.meta.reviewedLeads ? `${claudeVerified.meta.reviewedLeads} top leads checked by Claude.` : "Claude verification not run.") },
       { agent: "memory-agent", status: "ok", detail: `${remembered.stats.newSignals} new signals, ${remembered.stats.knownSignals} already seen.` }

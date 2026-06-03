@@ -32,24 +32,9 @@ const searchModes = [
     detail: "Recent PRH registrations, official updates and registered notices."
   },
   {
-    value: "mid-market",
-    label: "Mid-market",
-    detail: "Existing companies with sourced 50-249 employee counts or official financial scale proxy. This is the core Novapolis target segment."
-  },
-  {
-    value: "large-opportunities",
-    label: "Large 250-999",
-    detail: "Existing companies with sourced 250-999 employee counts or official financial scale proxy. Secondary Novapolis targets: project teams, satellite office needs, meetings and employee services."
-  },
-  {
-    value: "enterprise-watch",
-    label: "Enterprise watch",
-    detail: "Existing companies with sourced 1000+ employee counts. Kept separate so molochs do not dominate hot leads."
-  },
-  {
     value: "listed-growth",
-    label: "Listed growth",
-    detail: "Region-registered Oyj companies matched to Nasdaq Helsinki and checked for sustained share-price growth or a large jump."
+    label: "Largest stock jumps",
+    detail: "Region-registered Oyj companies matched to Nasdaq Helsinki and checked for the strongest listed-market momentum."
   }
 ];
 
@@ -67,7 +52,7 @@ export default function App() {
     marketArea: "kuopio-hub",
     customRegion: "Kuopio, Siilinjarvi",
     days: 30,
-    visibility: "new-signals",
+    visibility: "include-seen",
     useCache: true,
     claude: false,
     claudeLimit: 5,
@@ -101,7 +86,8 @@ export default function App() {
     currentEmployeeSearchLimit: String(form.employeeSearchLimit),
     publicListed: String(form.marketMode === "listed-growth"),
     claude: String(form.claude),
-    claudeLimit: String(form.claudeLimit)
+    claudeLimit: String(form.claudeLimit),
+    recordDisplay: "false"
   }), [form, region]);
 
   async function runRadar() {
@@ -110,7 +96,41 @@ export default function App() {
     try {
       const response = await fetch(`/api/radar?${query}`);
       if (!response.ok) throw new Error(`API error ${response.status}`);
-      setData(await response.json());
+      const result = await response.json();
+
+      if (
+        form.marketMode === "listed-growth" &&
+        (result.leads?.length || 0) === 0 &&
+        (result.totals?.companiesReturned || 0) > 0 &&
+        (result.totals?.listedCompaniesChecked || 0) === 0
+      ) {
+        const fallbackQuery = new URLSearchParams(query);
+        fallbackQuery.set("refreshCache", "true");
+        fallbackQuery.set("visibility", "include-seen");
+        fallbackQuery.set("includeSeen", "true");
+        const fallbackResponse = await fetch(`/api/radar?${fallbackQuery}`);
+        if (!fallbackResponse.ok) throw new Error(`API error ${fallbackResponse.status}`);
+        setForm((current) => ({ ...current, visibility: "include-seen" }));
+        setData(await fallbackResponse.json());
+        return;
+      }
+
+      if (
+        form.visibility === "new-signals" &&
+        (result.leads?.length || 0) === 0 &&
+        ((result.totals?.knownSignals || 0) > 0 || (result.totals?.knownCandidateSignals || 0) > 0)
+      ) {
+        const fallbackQuery = new URLSearchParams(query);
+        fallbackQuery.set("visibility", "include-seen");
+        fallbackQuery.set("includeSeen", "true");
+        const fallbackResponse = await fetch(`/api/radar?${fallbackQuery}`);
+        if (!fallbackResponse.ok) throw new Error(`API error ${fallbackResponse.status}`);
+        setForm((current) => ({ ...current, visibility: "include-seen" }));
+        setData(await fallbackResponse.json());
+        return;
+      }
+
+      setData(result);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -147,7 +167,18 @@ export default function App() {
       <section className="toolbar" aria-label="Lead radar filters">
         <label className="field mode-field">
           Search mode
-          <select value={form.marketMode} onChange={(event) => setForm({ ...form, marketMode: event.target.value })}>
+          <select
+            value={form.marketMode}
+            onChange={(event) => {
+              const marketMode = event.target.value;
+              setForm({
+                ...form,
+                marketMode,
+                marketArea: marketMode === "listed-growth" ? "whole-finland" : form.marketArea,
+                visibility: "include-seen"
+              });
+            }}
+          >
             {searchModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
           </select>
         </label>
