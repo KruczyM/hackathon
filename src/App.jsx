@@ -59,6 +59,8 @@ const FORCED_ENRICHMENT_OPTIONS = {
   virrePeople: true
 };
 
+const LEADS_PER_PAGE = 15;
+
 export default function App() {
   const [form, setForm] = useState({
     marketMode: "new-changes",
@@ -68,7 +70,9 @@ export default function App() {
     visibility: "new-signals",
     useCache: true,
     claude: false,
-    claudeLimit: 5
+    claudeLimit: 5,
+    employeeSearch: false,
+    employeeSearchLimit: 5
   });
   const [data, setData] = useState(null);
   const [prefetch, setPrefetch] = useState(null);
@@ -94,8 +98,8 @@ export default function App() {
     websiteDiscoveryLimit: "12",
     virrePeople: String(FORCED_ENRICHMENT_OPTIONS.virrePeople),
     virreLimit: "12",
-    currentEmployeeSearch: String(form.claude),
-    currentEmployeeSearchLimit: String(form.claudeLimit),
+    currentEmployeeSearch: String(form.employeeSearch),
+    currentEmployeeSearchLimit: String(form.employeeSearchLimit),
     publicListed: String(form.marketMode === "listed-growth"),
     claude: String(form.claude),
     claudeLimit: String(form.claudeLimit)
@@ -199,7 +203,7 @@ export default function App() {
             checked={form.claude}
             onChange={(event) => setForm({ ...form, claude: event.target.checked })}
           />
-          Claude verify + employee search
+          Claude verify top leads
         </label>
 
         {form.claude && (
@@ -211,6 +215,28 @@ export default function App() {
               max="25"
               value={form.claudeLimit}
               onChange={(event) => setForm({ ...form, claudeLimit: event.target.value })}
+            />
+          </label>
+        )}
+
+        <label className="check employee-search-field">
+          <input
+            type="checkbox"
+            checked={form.employeeSearch}
+            onChange={(event) => setForm({ ...form, employeeSearch: event.target.checked })}
+          />
+          Agent employee search
+        </label>
+
+        {form.employeeSearch && (
+          <label className="field employee-limit-field">
+            Employee search limit
+            <input
+              type="number"
+              min="1"
+              max="25"
+              value={form.employeeSearchLimit}
+              onChange={(event) => setForm({ ...form, employeeSearchLimit: event.target.value })}
             />
           </label>
         )}
@@ -253,6 +279,7 @@ export default function App() {
       {error && <section className="error">Error: {error}</section>}
       {!data && !error && <EmptyState />}
       {data && <Results data={data} claudeEnabled={form.claude} />}
+      <ScrollTopButton />
     </main>
   );
 }
@@ -282,6 +309,23 @@ function PrefetchStatus({ prefetch }) {
 }
 
 function Results({ data, claudeEnabled }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil((data.leads?.length || 0) / LEADS_PER_PAGE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * LEADS_PER_PAGE;
+  const pageLeads = (data.leads || []).slice(pageStart, pageStart + LEADS_PER_PAGE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [data.startedAt]);
+
+  function changePage(nextPage) {
+    setPage(Math.min(Math.max(1, nextPage), totalPages));
+    requestAnimationFrame(() => {
+      document.getElementById("lead-results")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
   return (
     <>
       <section className="metrics">
@@ -335,14 +379,36 @@ function Results({ data, claudeEnabled }) {
         </section>
       )}
 
-      <section className="lead-list">
+      {data.leads.length > 0 && (
+        <Pagination
+          page={currentPage}
+          totalPages={totalPages}
+          totalItems={data.leads.length}
+          pageStart={pageStart}
+          pageSize={LEADS_PER_PAGE}
+          onPageChange={changePage}
+        />
+      )}
+
+      <section className="lead-list" id="lead-results">
         {data.leads.length === 0 ? (
           <div className="empty compact">
             <h2>No new lead signals</h2>
             <p>Enable already-shown items or reset memory to inspect previously returned results.</p>
           </div>
-        ) : data.leads.map((lead) => <LeadCard key={lead.company.businessId} lead={lead} claudeEnabled={claudeEnabled} />)}
+        ) : pageLeads.map((lead) => <LeadCard key={lead.company.businessId} lead={lead} claudeEnabled={claudeEnabled} />)}
       </section>
+
+      {data.leads.length > LEADS_PER_PAGE && (
+        <Pagination
+          page={currentPage}
+          totalPages={totalPages}
+          totalItems={data.leads.length}
+          pageStart={pageStart}
+          pageSize={LEADS_PER_PAGE}
+          onPageChange={changePage}
+        />
+      )}
 
       <section className="sources">
         <h2>Sources</h2>
@@ -354,6 +420,35 @@ function Results({ data, claudeEnabled }) {
         ))}
       </section>
     </>
+  );
+}
+
+function Pagination({ page, totalPages, totalItems, pageStart, pageSize, onPageChange }) {
+  const first = totalItems === 0 ? 0 : pageStart + 1;
+  const last = Math.min(totalItems, pageStart + pageSize);
+  return (
+    <nav className="pagination" aria-label="Lead results pagination">
+      <span>{first}-{last} of {totalItems}</span>
+      <div>
+        <button className="secondary" onClick={() => onPageChange(page - 1)} disabled={page <= 1}>Previous</button>
+        <strong>Page {page} / {totalPages}</strong>
+        <button className="secondary" onClick={() => onPageChange(page + 1)} disabled={page >= totalPages}>Next</button>
+      </div>
+    </nav>
+  );
+}
+
+function ScrollTopButton() {
+  return (
+    <button
+      type="button"
+      className="scroll-top"
+      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      aria-label="Scroll to top"
+      title="Scroll to top"
+    >
+      Top
+    </button>
   );
 }
 

@@ -375,6 +375,49 @@ button {
   margin-top: 18px;
 }
 
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18px;
+  background: #fff;
+  border: 1px solid #dde5de;
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.pagination span,
+.pagination strong {
+  color: #526263;
+  font-size: 0.9rem;
+}
+
+.pagination div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pagination button {
+  min-height: 38px;
+}
+
+.scroll-top {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 20;
+  min-width: 52px;
+  min-height: 46px;
+  border-radius: 999px;
+  background: #0f766e;
+  color: #fff;
+  box-shadow: 0 10px 28px rgba(29, 37, 40, 0.2);
+}
+
 .lead {
   background: #fff;
   border: 1px solid #dde5de;

@@ -52,9 +52,15 @@ test("newsletter uses Claude newsletter line when Claude review exists", () => {
   assert.doesNotMatch(newsletter.hot[0], /Do not claim operational expansion/i);
 });
 
-test("newsletter does not fall back to internal pitch when Claude review is missing", () => {
-  const newsletter = buildNewsletter([listedLead], { ...context, claude: true }, { newSignals: 1, knownSignals: 0 });
+test("newsletter uses available lead pitch when Claude review is missing for that lead", () => {
+  const lead = {
+    ...listedLead,
+    pitch: "Use the verified public business contact and ask whether investor attention creates a need for local meeting rooms.",
+    tailoredPitchAngle: "Use the verified public business contact and ask whether investor attention creates a need for local meeting rooms."
+  };
+  const newsletter = buildNewsletter([lead], { ...context, claude: true }, { newSignals: 1, knownSignals: 0 });
 
-  assert.match(newsletter.hot[0], /Claude review was not available/);
+  assert.match(newsletter.hot[0], /verified public business contact/);
+  assert.doesNotMatch(newsletter.hot[0], /Claude review was not available/);
   assert.doesNotMatch(newsletter.hot[0], /Do not claim operational expansion/i);
 });

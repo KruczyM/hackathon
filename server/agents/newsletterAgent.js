@@ -26,7 +26,9 @@ function itemLine(lead, options = {}) {
       const reviewedLine = cleanPitch(lead.newsletterLine || lead.customerFacingPitch || lead.tailoredPitchAngle || lead.agentReview.outreachAngle || "");
       if (reviewedLine) return `${lead.company.name} (${lead.score}) - ${reviewedLine}`;
     }
-    return `${lead.company.name} (${lead.score}) - ${factualReason(lead)} Claude review was not available for this lead.`;
+    const pitchLine = cleanPitch(lead.newsletterLine || lead.customerFacingPitch || lead.tailoredPitchAngle || lead.pitch || "");
+    if (pitchLine) return `${lead.company.name} (${lead.score}) - ${pitchLine}`;
+    return `${lead.company.name} (${lead.score}) - ${factualReason(lead)}`;
   }
 
   const reason = factualReason(lead);

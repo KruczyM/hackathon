@@ -35,6 +35,8 @@ Open `http://127.0.0.1:5173`.
 
 The backend listens on `http://127.0.0.1:8787`.
 
+In development there are two local URLs because Vite serves the React frontend on `5173`, while the Express API runs separately on `8787`. In production/start mode the backend serves the built frontend from `http://127.0.0.1:8787`.
+
 ## Defaults
 
 - Market area: Kuopio hub.
@@ -44,7 +46,7 @@ The backend listens on `http://127.0.0.1:8787`.
 - Public website enrichment: on.
 - Website discovery: on for the top 12 scanned leads, no search API key required.
 - PRH/XBRL financial statement employee count: on for scanned leads.
-- Current employee web search: on when `Claude verify + employee search` is enabled; search results are only URL hints, not final fact sources.
+- Current employee web search: off by default; enable `Agent employee search` when you want deeper employee-count discovery from company-owned pages/PDFs.
 - Virre Trade Register extract scan: on for the top 12 scanned leads.
 - Listed-market scan: on only when `Listed growth` mode is selected, no ticker entry required.
 - Claude verification: off until `ANTHROPIC_API_KEY` is set and the UI toggle is enabled.
@@ -64,7 +66,7 @@ The financials agent then searches the XML facts for employee/personnel count fa
 
 ## Current Employee Web Search
 
-When `Claude verify + employee search` is enabled, the app runs an extra current-employee search before Claude review:
+When `Agent employee search` is enabled, the app runs an extra current-employee search:
 
 - It searches phrases like `"Company Oy" työntekijät`, `"Company Oy" henkilöstö`, and `"Company Oy" employees`.
 - It uses search results only to discover candidate URLs.
@@ -188,7 +190,7 @@ The task starts the backend through `npm start`, opens `http://127.0.0.1:8787`, 
 3. Put the key in `ANTHROPIC_API_KEY`.
 4. Save `.env` in the project root, next to `package.json`.
 5. Restart `npm run dev`.
-6. In the UI, enable `Claude verify + employee search`.
+6. In the UI, enable `Claude verify top leads`.
 7. Keep `claudeLimit` at 5 for testing.
 
 Claude does not fetch private contact databases by itself. It verifies and improves lead reasoning from evidence collected by the source and enrichment agents.
