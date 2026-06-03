@@ -129,7 +129,9 @@ The app stores:
 
 - `data/seen.json`: signal IDs and displayed companies.
 - `data/company-history.json`: growth snapshots.
-- `data/company-cache.json`: cached enrichment facts by Business ID.
+- `data/company-cache.json`: cached enrichment facts by Business ID plus a daily cache journal.
+
+When `Use cached enrichment` is enabled and the cache journal shows that enrichment was refreshed today, the radar runs in fast cache-only mode for enrichment: it compares candidate Business IDs against `data/company-cache.json`, returns stored enrichment for cached companies, and skips live Virre/website/web enrichment for missing or stale entries. Turn off `Use cached enrichment` to force a live refresh.
 
 Background prefetch runs `whole-finland` scans for the configured modes and writes cache, but it calls the radar with `recordDisplay=false`. That means prefetched companies are not marked as displayed, so the next user search can still show them as fresh results.
 

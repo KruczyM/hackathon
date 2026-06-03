@@ -38,8 +38,8 @@ const searchModes = [
   },
   {
     value: "large-opportunities",
-    label: "Large opportunities",
-    detail: "Existing companies with sourced 250-999 employee counts. Requires a stronger reason than size alone."
+    label: "Large 250-999",
+    detail: "Existing companies with sourced 250-999 employee counts. Secondary Novapolis targets: project teams, satellite office needs, meetings and employee services."
   },
   {
     value: "enterprise-watch",
@@ -373,12 +373,6 @@ function Results({ data, claudeEnabled }) {
         <NewsletterList title="Changes" items={data.newsletter.changes} />
       </section>
 
-      {data.errors.length > 0 && (
-        <section className="warning">
-          {data.errors.map((item) => <p key={`${item.source}-${item.city}`}>{item.source} / {item.city}: {item.message}</p>)}
-        </section>
-      )}
-
       {data.leads.length > 0 && (
         <Pagination
           page={currentPage}
@@ -392,10 +386,7 @@ function Results({ data, claudeEnabled }) {
 
       <section className="lead-list" id="lead-results">
         {data.leads.length === 0 ? (
-          <div className="empty compact">
-            <h2>No new lead signals</h2>
-            <p>Enable already-shown items or reset memory to inspect previously returned results.</p>
-          </div>
+          <NoLeadResults data={data} />
         ) : pageLeads.map((lead) => <LeadCard key={lead.company.businessId} lead={lead} claudeEnabled={claudeEnabled} />)}
       </section>
 
@@ -420,6 +411,42 @@ function Results({ data, claudeEnabled }) {
         ))}
       </section>
     </>
+  );
+}
+
+function NoLeadResults({ data }) {
+  if (data.context?.marketMode === "listed-growth") {
+    const matched = data.totals.listedCompaniesMatched || 0;
+    const histories = data.totals.listedPriceHistories || 0;
+    return (
+      <div className="empty compact">
+        <h2>No listed growth leads selected</h2>
+        <p>
+          {matched} listed companies matched to Finnish shares and {histories} price histories were checked.
+          No matched share passed the sustained-growth or large-jump thresholds, so cache/history settings did not hide the result.
+        </p>
+      </div>
+    );
+  }
+
+  if (data.totals?.cacheOnly) {
+    const skipped = (data.totals.cacheSkippedMissing || 0) + (data.totals.cacheSkippedStale || 0);
+    return (
+      <div className="empty compact">
+        <h2>No cached leads selected</h2>
+        <p>
+          Daily cache mode used {data.totals.cacheHits || 0} cached company records and skipped {skipped} missing/stale records for speed.
+          Turn off Use cached enrichment to force a live refresh.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="empty compact">
+      <h2>No new lead signals</h2>
+      <p>Enable already-shown items or reset memory to inspect previously returned results.</p>
+    </div>
   );
 }
 
