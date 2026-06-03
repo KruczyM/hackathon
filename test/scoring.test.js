@@ -51,8 +51,9 @@ test("new company with Virre decision maker but no contact needs verification an
   assert.ok(lead.score <= 70);
   assert.equal(lead.companySizeEstimate.value, "unknown");
   assert.equal(lead.growthHiringSignal, "none");
-  assert.equal(lead.customerFacingPitch, null);
+  assert.match(lead.customerFacingPitch, /workspace|meeting|employee services/i);
   assert.equal(/small team|growing team|hiring/i.test(lead.pitch), false);
+  assert.equal(/small team|growing team|hiring/i.test(lead.customerFacingPitch), false);
 });
 
 test("verified contact plus listed growth can become hot", () => {

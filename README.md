@@ -125,6 +125,8 @@ A decision maker from Virre is useful evidence, but it is not a public business 
 
 Enterprise companies (`1000+`, especially `5000+`) are treated differently from normal warm leads. They can still be useful for satellite offices, meeting rooms, local projects, events or employee services, but they are capped unless there is sourced growth/contact evidence.
 
+Customer-facing pitch drafts are generated for `Ready` and `Needs verification` leads. For `Needs verification`, the draft is deliberately cautious: it asks discovery questions and avoids unsupported claims about hiring, growth, team size, funding or premises need. It should be used manually only after a public business contact route has been verified. Leads marked `Blocked` do not get a customer-facing draft until the source conflict is resolved.
+
 ## Visibility, Cache And Prefetch
 
 The UI has three visibility modes:
@@ -149,6 +151,10 @@ When `Use cached enrichment` is enabled and the cache is younger than 12 hours, 
 Background prefetch runs `whole-finland` scans for the configured modes and writes cache, but it calls the radar with `recordDisplay=false`. That means prefetched companies are not marked as displayed, so the next user search can still show them as fresh results. Prefetched listed-company Yahoo employee fallbacks and listed-market signals are saved in `company_enrichment_cache.enrichment_json`, so subsequent cache-only runs can reuse them without calling Yahoo again.
 
 `POST /api/prefetch/run?force=true` bypasses the 12-hour source/enrichment cache reads and refreshes live endpoints again, while still writing the refreshed PRH/YTJ snapshots, Yahoo employee fallbacks and listed-market signals back to SQLite.
+
+The UI button `Prefetch Finland now` triggers the same forced prefetch request, but it does not render a live prefetch status panel. Use `GET /api/prefetch/status` when you need diagnostics for the latest background run.
+
+If external HTTPS access is blocked for Node, prefetch/radar errors include the underlying network cause, for example `EACCES`, `ENOTFOUND`, timeout, host, address and origin URL. Allow outbound TCP `443` for `node.exe` to `avoindata.prh.fi`, `api.nfin.dev` and `query1.finance.yahoo.com`, or configure `HTTP_PROXY` / `HTTPS_PROXY` in the environment when running behind a proxy.
 
 Useful endpoints:
 

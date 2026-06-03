@@ -647,6 +647,28 @@ function pitch(company, signals, enrichment) {
   return `${currentName(company)} has a recent official change. Ask what changed operationally, then qualify need for flexible space, events, employee services or Novapolis community access${line ? ` in relation to ${lowerLine}` : ""}. ${contact}`;
 }
 
+function customerFacingPitch(company, signals, enrichment, outreachReadiness) {
+  if (outreachReadiness === "Blocked") return null;
+  const name = currentName(company);
+  const line = businessLine(company).description;
+  const hasNewCompany = signals.some((signal) => signal.type === "new_company");
+  const hasNotice = signals.some((signal) => signal.type === "registered_notice");
+  const hasListedMarketGrowth = signals.some((signal) => signal.type === "listed_market_sustained_growth" || signal.type === "listed_market_jump");
+  const hasScaleEvidence = enrichment?.employeeCount || enrichment?.organizationScaleProxy;
+  const intro = hasNewCompany
+    ? `I noticed that ${name} was recently registered`
+    : hasListedMarketGrowth
+      ? `I noticed recent public market attention around ${name}`
+      : hasNotice
+        ? `I noticed a recent public registry update for ${name}`
+        : `I came across ${name}`;
+  const context = hasScaleEvidence
+    ? "and wanted to understand whether your current setup creates any need for workspace, meeting rooms, event space or employee services."
+    : "and wanted to ask whether workspace, meeting rooms, event space or employee services are relevant to your current plans.";
+  const sector = line ? ` I saw the company is listed under ${line.toLowerCase()}, so I will keep this practical and brief.` : "";
+  return `${intro} ${context}${sector} If useful, I would be happy to share how Novapolis supports companies with flexible premises, meetings and workplace services.`;
+}
+
 function enrichmentSignals(company, enrichment) {
   if (!enrichment) return [];
   const signals = [];
@@ -708,6 +730,7 @@ export function buildLead(company, options = {}) {
   const sortedSignals = signals.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
   const safety = applyLeadScoringSafety(rawScore, sortedSignals, enrichment);
   const internalPitch = pitch(company, sortedSignals, enrichment);
+  const customerPitch = customerFacingPitch(company, sortedSignals, enrichment, safety.outreachReadiness);
   const actions = recommendedActions(enrichment, safety.outreachReadiness);
 
   return {
@@ -746,7 +769,7 @@ export function buildLead(company, options = {}) {
     complianceWarnings: complianceWarnings(enrichment, safety.outreachReadiness),
     novapolisAngles: novapolisAngles(company, sortedSignals, enrichment),
     tailoredPitchAngle: internalPitch,
-    customerFacingPitch: safety.outreachReadiness === "Ready" ? internalPitch : null,
+    customerFacingPitch: customerPitch,
     pitch: internalPitch,
     recommendedActions: actions,
     recommendedAction: actions.join(" ")

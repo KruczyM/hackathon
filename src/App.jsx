@@ -563,7 +563,7 @@ function LeadCard({ lead, claudeEnabled }) {
             <h3>Internal pitch angle</h3>
             <p>{lead.tailoredPitchAngle || lead.pitch}</p>
             <h3>Customer-facing pitch</h3>
-            <p>{lead.customerFacingPitch || "Not generated until outreach readiness is Ready."}</p>
+            <p>{lead.customerFacingPitch || "No safe customer-facing draft generated for this lead."}</p>
             {lead.agentReview && (
               <p className="agent-review">
                 Claude: {lead.agentReview.evidenceVerdict}. Missing: {(lead.agentReview.missingFields || []).join(", ") || "none"}.

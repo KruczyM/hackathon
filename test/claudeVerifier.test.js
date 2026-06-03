@@ -17,7 +17,7 @@ test("verifyLeadsWithClaude uses outreachAngle when tailoredPitchAngle is missin
             evidenceVerdict: "partial",
             missingFields: ["official website", "public contact"],
             outreachAngle: "Eagle Filters Group Oyj has a sourced +43.5% listed-market signal; use it only for manual qualification and verify contact route first.",
-            customerFacingPitch: "Should not be used because readiness is not Ready.",
+            customerFacingPitch: "I noticed Eagle Filters Group Oyj has a sourced listed-market signal and wanted to ask whether workspace, meetings or employee services are relevant to current priorities.",
             newsletterLine: "Eagle Filters Group Oyj: +43.5% listed-market signal; manual verification required.",
             warnings: ["manual verification required"]
           }])
@@ -37,7 +37,7 @@ test("verifyLeadsWithClaude uses outreachAngle when tailoredPitchAngle is missin
     assert.equal(result.meta.status, "ok");
     assert.equal(result.leads[0].tailoredPitchAngle, "Eagle Filters Group Oyj has a sourced +43.5% listed-market signal; use it only for manual qualification and verify contact route first.");
     assert.equal(result.leads[0].pitch, result.leads[0].tailoredPitchAngle);
-    assert.equal(result.leads[0].customerFacingPitch, null);
+    assert.match(result.leads[0].customerFacingPitch, /workspace, meetings or employee services/i);
     assert.doesNotMatch(result.leads[0].tailoredPitchAngle, /Do not claim operational expansion/i);
   } finally {
     globalThis.fetch = originalFetch;

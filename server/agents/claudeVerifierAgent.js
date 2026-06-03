@@ -86,7 +86,8 @@ async function callClaude(leads, context, apiKey) {
         "For listed-market signals, describe only the sourced price movement and do not infer revenue, hiring, funding or office expansion unless that evidence is provided.",
         "Avoid generic warnings as the main output. If the only growth evidence is listed-market price movement, say this is a watch/qualification lead and name the exact sourced price signal, contact route, and missing operational evidence.",
         "Write concise, lead-specific text. Do not repeat policy phrases such as 'Do not claim operational expansion from price action alone' in the pitch.",
-        "If outreachReadiness is not Ready, customerFacingPitch must be null and the recommendation must be manual verification only.",
+        "If outreachReadiness is Needs verification, still write a cautious customerFacingPitch that can be used manually after verifying a public contact route. It must ask discovery questions and must not claim growth, hiring, team size, funding or premises need unless explicitly evidenced.",
+        "If outreachReadiness is Blocked, customerFacingPitch must be null and the recommendation must be source-conflict resolution only.",
         "If evidence is missing, say exactly what is missing.",
         "Return strict JSON array only."
       ].join(" "),
@@ -164,7 +165,9 @@ export async function verifyLeadsWithClaude(leads, context) {
     const enriched = leads.map((lead) => {
       const review = reviewMap.get(lead.company.businessId);
       if (!review) return lead;
-      const customerFacingPitch = lead.outreachReadiness === "Ready" ? (cleanClaudeText(review.customerFacingPitch) || null) : null;
+      const customerFacingPitch = lead.outreachReadiness === "Blocked"
+        ? null
+        : (cleanClaudeText(review.customerFacingPitch) || lead.customerFacingPitch || null);
       const tailoredPitchAngle = reviewText(
         review.tailoredPitchAngle,
         review.tailoredPitch,
